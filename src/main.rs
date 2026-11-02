@@ -1,5 +1,7 @@
 mod app;
 mod dialogs;
+mod fonts;
+mod icons;
 mod model;
 mod session;
 mod theme;
@@ -23,7 +25,7 @@ struct AppRunner {
 impl AppRunner {
     pub fn new(screenshot_path: Option<PathBuf>) -> Self {
         Self {
-            app: RemoportApp::default(),
+            app: RemoportApp::load(),
             screenshot_path,
             frame_count: 0,
             screenshot_taken: false,
@@ -107,14 +109,17 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("Remoport")
             .with_app_id(APP_ID)
-            .with_inner_size([1170.0, 720.0])
-            .with_min_inner_size([800.0, 500.0]),
+            .with_inner_size([1200.0, 760.0])
+            .with_min_inner_size([860.0, 540.0]),
         ..Default::default()
     };
 
     eframe::run_native(
         "Remoport",
         options,
-        Box::new(|_cc| Ok(Box::new(AppRunner::new(screenshot_path)))),
+        Box::new(|cc| {
+            fonts::install(&cc.egui_ctx);
+            Ok(Box::new(AppRunner::new(screenshot_path)))
+        }),
     )
 }

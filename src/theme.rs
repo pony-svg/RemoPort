@@ -1,9 +1,10 @@
 use egui::{Color32, Context, RichText, Stroke};
 
 /// Light or dark look, chosen in Settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Appearance {
     Dark,
+    #[default]
     Light,
 }
 
@@ -14,7 +15,9 @@ pub struct Theme {
     pub card_bg: Color32,
     pub card_border: Color32,
     pub card_hover: Color32,
-    pub thumb_bg: Color32,
+    /// Ends of the diagonal shade behind a PC card's illustration.
+    pub thumb_from: Color32,
+    pub thumb_to: Color32,
     pub nav_selected: Color32,
     pub nav_hover: Color32,
     pub accent: Color32,
@@ -38,7 +41,8 @@ impl Theme {
             card_bg: Color32::from_rgb(0x2d, 0x2d, 0x2d),
             card_border: Color32::from_rgb(0x3a, 0x3a, 0x3a),
             card_hover: Color32::from_rgb(0x38, 0x38, 0x38),
-            thumb_bg: Color32::from_rgb(0x16, 0x1c, 0x24),
+            thumb_from: Color32::from_rgb(0x0f, 0x4f, 0x4a),
+            thumb_to: Color32::from_rgb(0x1b, 0x2a, 0x3d),
             nav_selected: Color32::from_rgb(0x32, 0x32, 0x32),
             nav_hover: Color32::from_rgb(0x26, 0x26, 0x26),
             // Remoport accent (provisional): a teal of its own.
@@ -52,14 +56,15 @@ impl Theme {
     pub fn light() -> Self {
         Self {
             appearance: Appearance::Light,
-            bg_dark: Color32::from_rgb(0xf6, 0xf7, 0xf8),
-            sidebar_bg: Color32::from_rgb(0xeb, 0xed, 0xef),
+            bg_dark: Color32::from_rgb(0xfa, 0xfa, 0xfb),
+            sidebar_bg: Color32::from_rgb(0xf0, 0xf1, 0xf3),
             card_bg: Color32::from_rgb(0xff, 0xff, 0xff),
-            card_border: Color32::from_rgb(0xd9, 0xdc, 0xe0),
-            card_hover: Color32::from_rgb(0xf1, 0xf3, 0xf5),
-            thumb_bg: Color32::from_rgb(0xe4, 0xe9, 0xee),
-            nav_selected: Color32::from_rgb(0xdc, 0xdf, 0xe3),
-            nav_hover: Color32::from_rgb(0xe3, 0xe6, 0xe9),
+            card_border: Color32::from_rgb(0xe1, 0xe4, 0xe8),
+            card_hover: Color32::from_rgb(0xf5, 0xf7, 0xf8),
+            thumb_from: Color32::from_rgb(0x7f, 0xd6, 0xcb),
+            thumb_to: Color32::from_rgb(0x9c, 0xb8, 0xe0),
+            nav_selected: Color32::from_rgb(0xff, 0xff, 0xff),
+            nav_hover: Color32::from_rgb(0xe6, 0xe8, 0xeb),
             // The same teal, darker, so it keeps its contrast on white.
             accent: Color32::from_rgb(0x12, 0x84, 0x7a),
             text_primary: Color32::from_rgb(0x1d, 0x1f, 0x22),
@@ -92,10 +97,6 @@ impl Theme {
 
     pub fn card_stroke(&self) -> Stroke {
         Stroke::new(1.0_f32, self.card_border)
-    }
-
-    pub fn card_rounding(&self) -> egui::Rounding {
-        egui::Rounding::same(8.0)
     }
 
     /// The filled accent button for the main action of a view or dialog.

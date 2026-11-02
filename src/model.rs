@@ -1,30 +1,36 @@
+use crate::theme::Appearance;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum NavTab {
-    Home,
+    Favorites,
+    #[default]
     Devices,
     Apps,
     Settings,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ViewMode {
+    #[default]
     Grid,
     List,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SortOption {
+    #[default]
     DeviceName,
     TimeLastConnected,
     Manual,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ResolutionOption {
+    #[default]
     Native,
     Fhd1080p,
     Qhd1440p,
@@ -145,7 +151,11 @@ pub struct UserAccount {
     pub is_active: bool,
 }
 
+/// Everything Remoport remembers between runs, saved as JSON in
+/// [`state_path`]. Fields added later fall back to their defaults when an
+/// older file is read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppStateData {
     pub bookmarks: Vec<DeviceBookmark>,
     pub remote_apps: Vec<RemoteAppItem>,
@@ -153,64 +163,168 @@ pub struct AppStateData {
     pub view_mode: ViewMode,
     pub sort_option: SortOption,
     pub sort_ascending: bool,
+    pub appearance: Appearance,
+    /// Resolution a newly added PC starts with (Settings → New PCs).
+    pub default_resolution: ResolutionOption,
+    pub active_tab: NavTab,
+    /// Groups the user folded away on the Devices page.
+    pub collapsed_groups: Vec<String>,
 }
 
 impl Default for AppStateData {
     fn default() -> Self {
-        let mut sample_pc1 = DeviceBookmark::new(
-            "workstation.example.com".to_string(),
-            "Office workstation".to_string(),
-            "Work PCs".to_string(),
-        );
-        sample_pc1.is_favorite = true;
-        sample_pc1.last_connected = Some(Utc::now());
-
-        let mut sample_pc2 = DeviceBookmark::new(
-            "build01.example.com".to_string(),
-            "Build server".to_string(),
-            "Work PCs".to_string(),
-        );
-        sample_pc2.last_connected = Some(Utc::now());
-
-        let sample_apps = vec![
-            RemoteAppItem {
-                id: Uuid::new_v4(),
-                name: "Terminal".to_string(),
-                workspace_name: "Example workspace".to_string(),
-                icon_name: "terminal".to_string(),
-                is_favorite: true,
-                last_used: Some(Utc::now()),
-            },
-            RemoteAppItem {
-                id: Uuid::new_v4(),
-                name: "Files".to_string(),
-                workspace_name: "Example workspace".to_string(),
-                icon_name: "folder".to_string(),
-                is_favorite: false,
-                last_used: None,
-            },
-            RemoteAppItem {
-                id: Uuid::new_v4(),
-                name: "Web browser".to_string(),
-                workspace_name: "Example workspace".to_string(),
-                icon_name: "browser".to_string(),
-                is_favorite: false,
-                last_used: None,
-            },
-        ];
-
         Self {
-            bookmarks: vec![sample_pc1, sample_pc2],
-            remote_apps: sample_apps,
+            bookmarks: Vec::new(),
+            remote_apps: Vec::new(),
             user_account: UserAccount {
                 id: Uuid::new_v4(),
                 display_name: "Local profile".to_string(),
                 email: "Not signed in".to_string(),
                 is_active: true,
             },
-            view_mode: ViewMode::Grid,
-            sort_option: SortOption::DeviceName,
+            view_mode: ViewMode::default(),
+            sort_option: SortOption::default(),
             sort_ascending: true,
+            appearance: Appearance::default(),
+            default_resolution: ResolutionOption::default(),
+            active_tab: NavTab::default(),
+            collapsed_groups: Vec::new(),
         }
+    }
+}
+
+/// Where the state is kept: `$REMOPORT_CONFIG_DIR/state.json`, else
+/// `$XDG_CONFIG_HOME/remoport/state.json`, else `~/.config/remoport/state.json`.
+pub fn state_path() -> Option<PathBuf> {
+    let dir = match std::env::var_os("REMOPORT_CONFIG_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => match std::env::var_os("XDG_CONFIG_HOME") {
+            Some(config) => PathBuf::from(config).join("remoport"),
+            None => PathBuf::from(std::env::var_os("HOME")?).join(".config/remoport"),
+        },
+    };
+    Some(dir.join("state.json"))
+}
+
+impl AppStateData {
+    /// Reads the saved state, or starts empty. A file that cannot be read
+    /// as state is moved aside rather than overwritten, so nothing is lost.
+    pub fn load() -> Self {
+        state_path().map_or_else(Self::default, |path| Self::load_from(&path))
+    }
+
+    fn load_from(path: &Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+        match serde_json::from_str(&text) {
+            Ok(state) => state,
+            Err(err) => {
+                let aside = path.with_extension(format!(
+                    "json.unreadable-{}",
+                    Utc::now().format("%Y%m%d%H%M%S")
+                ));
+                eprintln!(
+                    "Remoport: {} could not be read ({err}); moved it to {}",
+                    path.display(),
+                    aside.display()
+                );
+                let _ = std::fs::rename(path, &aside);
+                Self::default()
+            }
+        }
+    }
+
+    /// Writes `json` (this state, serialized) to [`state_path`], replacing
+    /// the previous file only once the new one is complete.
+    pub fn save(json: &str) -> std::io::Result<()> {
+        match state_path() {
+            Some(path) => Self::save_to(&path, json),
+            None => Ok(()),
+        }
+    }
+
+    fn save_to(path: &Path, json: &str) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let partial = path.with_extension("json.partial");
+        std::fs::write(&partial, json)?;
+        std::fs::rename(&partial, path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("remoport-test-{name}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn saved_state_reads_back_the_same() {
+        let dir = scratch_dir("roundtrip");
+        let path = dir.join("state.json");
+        let mut state = AppStateData::default();
+        state.bookmarks.push(DeviceBookmark::new(
+            "pc.example.com".into(),
+            "Office".into(),
+            "Work".into(),
+        ));
+        state.appearance = Appearance::Dark;
+        state.collapsed_groups.push("devices:Work".into());
+        let json = serde_json::to_string_pretty(&state).expect("serialize");
+
+        AppStateData::save_to(&path, &json).expect("save");
+        let loaded = AppStateData::load_from(&path);
+
+        assert_eq!(serde_json::to_string_pretty(&loaded).expect("serialize"), json);
+        assert!(!path.with_extension("json.partial").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_missing_file_starts_empty() {
+        let dir = scratch_dir("missing");
+        let loaded = AppStateData::load_from(&dir.join("state.json"));
+        assert!(loaded.bookmarks.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unreadable_file_is_moved_aside_not_lost() {
+        let dir = scratch_dir("unreadable");
+        let path = dir.join("state.json");
+        std::fs::write(&path, "{ not json").expect("write");
+
+        let loaded = AppStateData::load_from(&path);
+
+        assert!(loaded.bookmarks.is_empty());
+        assert!(!path.exists(), "the broken file must not stay where it gets overwritten");
+        let kept: Vec<_> = std::fs::read_dir(&dir)
+            .expect("list")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains("unreadable"))
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read_to_string(kept[0].path()).expect("read"), "{ not json");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_older_file_without_new_fields_still_loads() {
+        let dir = scratch_dir("older");
+        let path = dir.join("state.json");
+        std::fs::write(&path, r#"{"bookmarks": [], "view_mode": "List"}"#).expect("write");
+
+        let loaded = AppStateData::load_from(&path);
+
+        assert_eq!(loaded.view_mode, ViewMode::List);
+        assert_eq!(loaded.appearance, Appearance::Light);
+        assert!(path.exists(), "a readable file stays in place");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -54,97 +54,96 @@ impl RemoportApp {
 
         self.add_workspace_dialog.show(ctx);
 
+        if let Some(ref mut session) = self.active_session {
+            let mut disconnect = false;
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().fill(self.theme.bg_dark))
+                .show(ctx, |ui| session.render(ui, &mut disconnect));
+            if disconnect {
+                self.active_session = None;
+            }
+            return;
+        }
+
+        // Connection center. The sidebar gets a panel of its own so it spans
+        // the window's full height: its bottom items stay at the bottom, and
+        // the content area is not cut to the height of a row.
+        egui::SidePanel::left("sidebar")
+            .exact_width(220.0)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::none().fill(self.theme.sidebar_bg))
+            .show(ctx, |ui| self.show_sidebar(ui));
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(self.theme.bg_dark))
-            .show(ctx, |ui| {
-                if let Some(ref mut session) = self.active_session {
-                    let mut disconnect = false;
-                    session.render(ui, &mut disconnect);
-                    if disconnect {
-                        self.active_session = None;
-                    }
-                    return;
-                }
-
-                // Connection center
-                ui.horizontal(|ui| {
-                    self.show_sidebar(ui);
-                    self.show_main_content(ui);
-                });
-            });
+            .show(ctx, |ui| self.show_main_content(ui));
     }
 
     fn show_sidebar(&mut self, ui: &mut Ui) {
-        let sidebar_width = 220.0;
-        let available_height = ui.available_height();
+        let rect = ui.max_rect();
+        ui.add_space(14.0);
 
-        ui.allocate_ui_with_layout(
-            vec2(sidebar_width, available_height),
-            Layout::top_down(Align::Min),
-            |ui| {
-                let rect = ui.available_rect_before_wrap();
-                ui.painter().rect_filled(rect, Rounding::ZERO, self.theme.sidebar_bg);
+        // User Profile Header
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            // Avatar circle (36x36)
+            let (avatar_rect, _resp) = ui.allocate_exact_size(vec2(36.0, 36.0), egui::Sense::hover());
+            ui.painter().circle_filled(
+                avatar_rect.center(),
+                18.0,
+                self.theme.accent,
+            );
+            ui.painter().text(
+                avatar_rect.center(),
+                Align2::CENTER_CENTER,
+                "👤",
+                FontId::proportional(18.0),
+                Color32::WHITE,
+            );
 
-                ui.add_space(14.0);
-
-                // User Profile Header
-                ui.horizontal(|ui| {
-                    ui.add_space(12.0);
-                    // Avatar circle (36x36)
-                    let (avatar_rect, _resp) = ui.allocate_exact_size(vec2(36.0, 36.0), egui::Sense::hover());
-                    ui.painter().circle_filled(
-                        avatar_rect.center(),
-                        18.0,
-                        self.theme.accent,
-                    );
-                    ui.painter().text(
-                        avatar_rect.center(),
-                        Align2::CENTER_CENTER,
-                        "👤",
-                        FontId::proportional(18.0),
-                        Color32::WHITE,
-                    );
-
-                    ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new(&self.state.user_account.display_name)
-                                .font(FontId::proportional(12.5))
-                                .strong()
-                                .color(self.theme.text_primary),
-                        );
-                        ui.label(
-                            egui::RichText::new(&self.state.user_account.email)
-                                .font(FontId::proportional(10.5))
-                                .color(self.theme.text_secondary),
-                        );
-                    });
-                });
-
-                ui.add_space(16.0);
-                ui.painter().line_segment(
-                    [
-                        Pos2::new(rect.min.x + 12.0, ui.cursor().min.y),
-                        Pos2::new(rect.max.x - 12.0, ui.cursor().min.y),
-                    ],
-                    Stroke::new(1.0_f32, self.theme.divider),
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new(&self.state.user_account.display_name)
+                        .font(FontId::proportional(12.5))
+                        .strong()
+                        .color(self.theme.text_primary),
                 );
-                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new(&self.state.user_account.email)
+                        .font(FontId::proportional(10.5))
+                        .color(self.theme.text_secondary),
+                );
+            });
+        });
 
-                // Navigation Items
-                self.sidebar_nav_button(ui, NavTab::Home, "⭐  Home");
-                self.sidebar_nav_button(ui, NavTab::Devices, "🖥  Devices");
-                self.sidebar_nav_button(ui, NavTab::Apps, "🗔  Apps");
-
-                // Bottom Sidebar Items
-                ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                    ui.add_space(12.0);
-                    self.sidebar_nav_button(ui, NavTab::Settings, "⚙  Settings");
-                    ui.add_space(4.0);
-                    let _ = ui.selectable_label(false, "💬  Feedback");
-                    let _ = ui.selectable_label(false, "❓  Help");
-                });
-            },
+        ui.add_space(16.0);
+        ui.painter().line_segment(
+            [
+                Pos2::new(rect.min.x + 12.0, ui.cursor().min.y),
+                Pos2::new(rect.max.x - 12.0, ui.cursor().min.y),
+            ],
+            Stroke::new(1.0_f32, self.theme.divider),
         );
+        ui.add_space(12.0);
+
+        // Navigation Items
+        self.sidebar_nav_button(ui, NavTab::Home, "⭐  Home");
+        self.sidebar_nav_button(ui, NavTab::Devices, "🖥  Devices");
+        self.sidebar_nav_button(ui, NavTab::Apps, "🗔  Apps");
+
+        // Bottom Sidebar Items
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            ui.add_space(12.0);
+            self.sidebar_nav_button(ui, NavTab::Settings, "⚙  Settings");
+            ui.add_space(4.0);
+            // Indented to line up with the navigation buttons above.
+            for label in ["💬  Feedback", "❓  Help"] {
+                ui.horizontal(|ui| {
+                    ui.add_space(18.0);
+                    let _ = ui.selectable_label(false, label);
+                });
+            }
+        });
     }
 
     fn sidebar_nav_button(&mut self, ui: &mut Ui, tab: NavTab, label: &str) {

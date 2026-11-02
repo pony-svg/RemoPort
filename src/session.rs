@@ -20,34 +20,37 @@ impl ActiveSession {
     }
 
     pub fn render(&mut self, ui: &mut Ui, on_disconnect: &mut bool) {
-        // Session Top Bar
-        ui.horizontal(|ui| {
-            ui.visuals_mut().override_text_color = Some(Color32::from_rgb(220, 220, 220));
-            ui.label(format!("🖥 {}", self.bookmark.display_title()));
-            ui.separator();
-            ui.label(format!("Host: {}", self.bookmark.pc_name));
-            ui.separator();
-            ui.label("Preview — not connected");
+        // Session Top Bar, padded away from the window edges
+        egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!("🖥 {}", self.bookmark.display_title()));
+                    ui.separator();
+                    ui.label(format!("Host: {}", self.bookmark.pc_name));
+                    ui.separator();
+                    ui.label("Preview — not connected");
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("❌ Close").clicked() {
-                    *on_disconnect = true;
-                }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("❌ Close").clicked() {
+                            *on_disconnect = true;
+                        }
 
-                if ui.button("🖥 Open in FreeRDP").clicked() {
-                    let host = self.bookmark.pc_name.clone();
-                    std::thread::spawn(move || {
-                        let target = format!("/v:{host}");
-                        for client in FREERDP_CLIENTS {
-                            if std::process::Command::new(client).arg(&target).spawn().is_ok() {
-                                break;
-                            }
+                        if ui.button("🖥 Open in FreeRDP").clicked() {
+                            let host = self.bookmark.pc_name.clone();
+                            std::thread::spawn(move || {
+                                let target = format!("/v:{host}");
+                                for client in FREERDP_CLIENTS {
+                                    if std::process::Command::new(client).arg(&target).spawn().is_ok() {
+                                        break;
+                                    }
+                                }
+                            });
+                            self.notification_msg = Some("Opening the session in FreeRDP…".to_string());
                         }
                     });
-                    self.notification_msg = Some("Opening the session in FreeRDP…".to_string());
-                }
+                });
             });
-        });
 
         ui.separator();
 

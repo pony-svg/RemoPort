@@ -1,6 +1,7 @@
 use crate::model::{
     AudioPlaybackMode, ColorQuality, DeviceBookmark, RedirectedFolder, ResolutionOption,
 };
+use crate::theme::Theme;
 use egui::{vec2, Align2, Color32, Context, Ui, Window};
 use uuid::Uuid;
 
@@ -69,8 +70,10 @@ impl Default for AddEditPcDialog {
 }
 
 impl AddEditPcDialog {
-    pub fn open_add(&mut self) {
+    /// Opens an empty dialog for a new PC, starting at `resolution`.
+    pub fn open_add(&mut self, resolution: ResolutionOption) {
         *self = Self::default();
+        self.resolution = resolution;
         self.is_open = true;
         self.is_edit = false;
     }
@@ -100,7 +103,7 @@ impl AddEditPcDialog {
         self.validation_error = None;
     }
 
-    pub fn show(&mut self, ctx: &Context, on_save: &mut Option<DeviceBookmark>) {
+    pub fn show(&mut self, ctx: &Context, theme: &Theme, on_save: &mut Option<DeviceBookmark>) {
         if !self.is_open {
             return;
         }
@@ -144,7 +147,7 @@ impl AddEditPcDialog {
                 // Dialog Action Buttons
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Save").clicked() {
+                        if ui.add(theme.primary_button("Save")).clicked() {
                             if self.pc_name.trim().is_empty() {
                                 self.validation_error = Some("PC name cannot be empty".to_string());
                             } else {
@@ -338,7 +341,7 @@ impl AddWorkspaceDialog {
         self.validation_message = None;
     }
 
-    pub fn show(&mut self, ctx: &Context) {
+    pub fn show(&mut self, ctx: &Context, theme: &Theme) {
         if !self.is_open {
             return;
         }
@@ -370,7 +373,7 @@ impl AddWorkspaceDialog {
 
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Subscribe").clicked() {
+                        if ui.add(theme.primary_button("Subscribe")).clicked() {
                             if self.email_or_url.trim().is_empty() {
                                 self.validation_message = Some("Please enter an email or workspace URL".to_string());
                             } else {

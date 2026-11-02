@@ -1,6 +1,7 @@
 use crate::dialogs::{AddEditPcDialog, AddWorkspaceDialog};
 use crate::fonts;
 use crate::icons::{self, Icon};
+use crate::logging;
 use crate::model::{
     state_path, AppStateData, DeviceBookmark, NavTab, RemoteAppItem, ResolutionOption,
     SortOption, ViewMode,
@@ -56,6 +57,14 @@ impl RemoportApp {
     /// Starts with the state saved by the previous run.
     pub fn load() -> Self {
         let state = AppStateData::load();
+        logging::event(format_args!(
+            "Remoport {} started: {} PCs and {} apps, {:?} appearance, state in {}",
+            env!("CARGO_PKG_VERSION"),
+            state.bookmarks.len(),
+            state.remote_apps.len(),
+            state.appearance,
+            state_path().map_or_else(|| "memory only".to_string(), |p| p.display().to_string()),
+        ));
         let last_saved = serde_json::to_string_pretty(&state).unwrap_or_default();
         Self {
             theme: Theme::for_appearance(state.appearance),
@@ -97,6 +106,7 @@ impl RemoportApp {
                 .frame(egui::Frame::none().fill(self.theme.bg_dark))
                 .show(ctx, |ui| session.render(ui, &mut disconnect));
             if disconnect {
+                logging::event("Session closed");
                 self.active_session = None;
             }
         } else {
@@ -125,7 +135,7 @@ impl RemoportApp {
         };
         if json != self.last_saved {
             if let Err(err) = AppStateData::save(&json) {
-                eprintln!("Remoport: could not save the state: {err}");
+                logging::event(format_args!("Could not save the state: {err}"));
             }
             self.last_saved = json;
         }
@@ -146,7 +156,7 @@ impl RemoportApp {
                     .rail_item(ui, icon, label, self.state.active_tab == tab)
                     .clicked()
                 {
-                    self.state.active_tab = tab;
+                    self.open_page(tab);
                 }
             }
 
@@ -161,6 +171,7 @@ impl RemoportApp {
             let add = self.rail_item(ui, Icon::Plus, "Add", false);
             let menu = ui.make_persistent_id("add_menu");
             if add.clicked() {
+                logging::event("Add menu opened");
                 ui.memory_mut(|m| m.toggle_popup(menu));
             }
             popup_below_widget(ui, menu, &add, PopupCloseBehavior::CloseOnClick, |ui| {
@@ -176,11 +187,12 @@ impl RemoportApp {
                 .on_hover_text("Report a problem or suggest an idea")
                 .clicked()
             {
+                logging::event("Opened the feedback page");
                 ui.ctx().open_url(egui::OpenUrl::new_tab(FEEDBACK_URL));
             }
             let settings = self.state.active_tab == NavTab::Settings;
             if self.rail_item(ui, Icon::Gear, "Settings", settings).clicked() {
-                self.state.active_tab = NavTab::Settings;
+                self.open_page(NavTab::Settings);
             }
         });
     }
@@ -219,6 +231,13 @@ impl RemoportApp {
         response.on_hover_cursor(CursorIcon::PointingHand)
     }
 
+    fn open_page(&mut self, tab: NavTab) {
+        if self.state.active_tab != tab {
+            logging::event(format_args!("Page {tab:?}"));
+            self.state.active_tab = tab;
+        }
+    }
+
     fn add_menu_items(&mut self, ui: &mut Ui) {
         if ui.button("Add a PC…").clicked() {
             self.add_edit_dialog.open_add(self.state.default_resolution);
@@ -227,6 +246,7 @@ impl RemoportApp {
             self.add_workspace_dialog.open();
         }
         if ui.button("Sign in to an organization…").clicked() {
+            logging::event("Add menu: Sign in to an organization");
             self.add_workspace_dialog.open();
         }
     }
@@ -303,6 +323,7 @@ impl RemoportApp {
                 self.account_button(ui);
                 ui.add_space(2.0);
                 if self.icon_button(ui, Icon::Help, "Help").clicked() {
+                    logging::event("Opened help");
                     ui.ctx().open_url(egui::OpenUrl::new_tab(HELP_URL));
                 }
                 if self.state.active_tab == NavTab::Devices {
@@ -325,6 +346,17 @@ impl RemoportApp {
     }
 
     fn view_menu_items(&mut self, ui: &mut Ui) {
+        let (view, sort) = (self.state.view_mode, self.state.sort_option);
+        self.view_menu_choices(ui);
+        if self.state.view_mode != view {
+            logging::event(format_args!("View: {:?}", self.state.view_mode));
+        }
+        if self.state.sort_option != sort {
+            logging::event(format_args!("Sort by: {:?}", self.state.sort_option));
+        }
+    }
+
+    fn view_menu_choices(&mut self, ui: &mut Ui) {
         ui.label(RichText::new("View").strong());
         ui.selectable_value(&mut self.state.view_mode, ViewMode::Grid, "Cards");
         ui.selectable_value(&mut self.state.view_mode, ViewMode::List, "List");
@@ -349,6 +381,7 @@ impl RemoportApp {
             .on_hover_cursor(CursorIcon::PointingHand);
         let menu = ui.make_persistent_id("account_menu");
         if response.clicked() {
+            logging::event("Account menu opened");
             ui.memory_mut(|m| m.toggle_popup(menu));
         }
         popup_below_widget(ui, menu, &response, PopupCloseBehavior::CloseOnClick, |ui| {
@@ -363,6 +396,7 @@ impl RemoportApp {
             );
             ui.separator();
             if ui.button("Sign in to an organization…").clicked() {
+                logging::event("Account menu: Sign in to an organization");
                 self.add_workspace_dialog.open();
             }
         });
@@ -455,7 +489,8 @@ impl RemoportApp {
     ) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if self.chip(ui, "All", filter.is_none(), false).clicked() {
+            if self.chip(ui, "All", filter.is_none(), false).clicked() && filter.is_some() {
+                logging::event(format_args!("Filter: all ({label})"));
                 *filter = None;
             }
             let text = filter.clone().unwrap_or_else(|| label.to_string());
@@ -474,6 +509,7 @@ impl RemoportApp {
                         .selectable_label(filter.as_deref() == Some(option.as_str()), option)
                         .clicked()
                     {
+                        logging::event(format_args!("Filter: {label} \"{option}\""));
                         *filter = Some(option.clone());
                     }
                 }
@@ -547,8 +583,10 @@ impl RemoportApp {
             .clicked()
         {
             if open {
+                logging::event(format_args!("Folded {key}"));
                 self.state.collapsed_groups.push(key.to_string());
             } else {
+                logging::event(format_args!("Unfolded {key}"));
                 self.state.collapsed_groups.retain(|g| g != key);
             }
         }
@@ -685,6 +723,7 @@ impl RemoportApp {
         let clicked = ui.add(self.theme.primary_button("Connect")).clicked();
         let host = self.quick_connect_host.trim().to_string();
         if (entered || clicked) && !host.is_empty() {
+            logging::event(format_args!("Quick connect to {host}"));
             let pc = DeviceBookmark::new(host.clone(), host, String::new());
             self.active_session = Some(ActiveSession::new(pc));
         }
@@ -888,6 +927,7 @@ impl RemoportApp {
 
         let menu = response.id.with("menu");
         if more.clicked() {
+            logging::event(format_args!("Menu of \"{}\"", pc.display_title()));
             ui.memory_mut(|m| m.toggle_popup(menu));
         } else if response.clicked() {
             self.connect_to(pc);
@@ -924,6 +964,11 @@ impl RemoportApp {
             .button(RichText::new("Delete…").color(DANGER))
             .clicked()
         {
+            logging::event(format_args!(
+                "Delete requested for \"{}\" ({})",
+                pc.display_title(),
+                pc.pc_name
+            ));
             self.pending_delete = Some(pc.clone());
             ui.close_menu();
         }
@@ -957,10 +1002,14 @@ impl RemoportApp {
             });
         match decision {
             Some(true) => {
+                logging::event(format_args!("Deleted \"{}\" ({})", pc.display_title(), pc.pc_name));
                 self.state.bookmarks.retain(|b| b.id != pc.id);
                 self.pending_delete = None;
             }
-            Some(false) => self.pending_delete = None,
+            Some(false) => {
+                logging::event(format_args!("Kept \"{}\": delete cancelled", pc.display_title()));
+                self.pending_delete = None;
+            }
             None => {}
         }
     }
@@ -1026,10 +1075,13 @@ impl RemoportApp {
     fn toggle_favorite(&mut self, id: uuid::Uuid) {
         if let Some(pc) = self.state.bookmarks.iter_mut().find(|b| b.id == id) {
             pc.is_favorite = !pc.is_favorite;
+            let change = if pc.is_favorite { "Added to" } else { "Removed from" };
+            logging::event(format_args!("{change} favorites: \"{}\"", pc.display_title()));
         }
     }
 
     fn connect_to(&mut self, pc: &DeviceBookmark) {
+        logging::event(format_args!("Connect to \"{}\" ({})", pc.display_title(), pc.pc_name));
         let mut updated_pc = pc.clone();
         updated_pc.last_connected = Some(Utc::now());
         if let Some(pos) = self.state.bookmarks.iter().position(|b| b.id == pc.id) {
@@ -1158,6 +1210,7 @@ impl RemoportApp {
             if ui.button(favorite).clicked() {
                 if let Some(app) = self.state.remote_apps.iter_mut().find(|a| a.id == id) {
                     app.is_favorite = !app.is_favorite;
+                    logging::event(format_args!("{favorite}: app \"{}\"", app.name));
                 }
                 ui.close_menu();
             }
@@ -1165,6 +1218,7 @@ impl RemoportApp {
     }
 
     fn open_app(&mut self, app: &RemoteAppItem) {
+        logging::event(format_args!("Open app \"{}\" from \"{}\"", app.name, app.workspace_name));
         let mut session = ActiveSession::new(DeviceBookmark::new(
             app.workspace_name.clone(),
             app.name.clone(),
@@ -1197,6 +1251,7 @@ impl RemoportApp {
             }
         });
         if appearance != self.theme.appearance {
+            logging::event(format_args!("Appearance: {appearance:?}"));
             self.state.appearance = appearance;
             self.theme = Theme::for_appearance(appearance);
             self.theme_applied = false;
@@ -1204,6 +1259,7 @@ impl RemoportApp {
 
         ui.add_space(26.0);
         self.settings_heading(ui, "New PCs");
+        let resolution = self.state.default_resolution;
         egui::ComboBox::from_label(RichText::new("Resolution for PCs you add").color(self.theme.text_secondary))
             .selected_text(self.state.default_resolution.display_label())
             .show_ui(ui, |ui| {
@@ -1220,6 +1276,12 @@ impl RemoportApp {
                     );
                 }
             });
+        if self.state.default_resolution != resolution {
+            logging::event(format_args!(
+                "Resolution for new PCs: {}",
+                self.state.default_resolution.display_label()
+            ));
+        }
 
         ui.add_space(26.0);
         self.settings_heading(ui, "Your data");
@@ -1228,6 +1290,13 @@ impl RemoportApp {
             .unwrap_or_else(|| "nowhere (no home folder)".to_string());
         ui.label(
             RichText::new(format!("Your PCs and settings are saved in {location}"))
+                .color(self.theme.text_secondary),
+        );
+        let log = logging::log_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "standard error only".to_string());
+        ui.label(
+            RichText::new(format!("What you do in Remoport is logged to {log}"))
                 .color(self.theme.text_secondary),
         );
 
@@ -1242,9 +1311,13 @@ impl RemoportApp {
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.hyperlink_to("Source code", REPO_URL);
+            if ui.hyperlink_to("Source code", REPO_URL).clicked() {
+                logging::event("Opened the source code page");
+            }
             ui.label(RichText::new("·").color(self.theme.text_secondary));
-            ui.hyperlink_to("Report a problem", FEEDBACK_URL);
+            if ui.hyperlink_to("Report a problem", FEEDBACK_URL).clicked() {
+                logging::event("Opened the feedback page");
+            }
         });
     }
 }
@@ -1256,5 +1329,11 @@ fn ellipsize(text: &str, max: usize) -> String {
     } else {
         let cut: String = text.chars().take(max.saturating_sub(1)).collect();
         format!("{cut}…")
+    }
+}
+
+impl Drop for RemoportApp {
+    fn drop(&mut self) {
+        logging::event("Remoport closed");
     }
 }

@@ -2,6 +2,7 @@ mod app;
 mod dialogs;
 mod fonts;
 mod icons;
+mod logging;
 mod model;
 mod session;
 mod theme;

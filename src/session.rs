@@ -1,3 +1,4 @@
+use crate::logging;
 use crate::model::DeviceBookmark;
 use egui::{Align2, Color32, FontId, Rounding, Stroke, Ui};
 
@@ -38,12 +39,20 @@ impl ActiveSession {
 
                         if ui.button("🖥 Open in FreeRDP").clicked() {
                             let host = self.bookmark.pc_name.clone();
+                            logging::event(format_args!("Open in FreeRDP: {host}"));
                             std::thread::spawn(move || {
                                 let target = format!("/v:{host}");
-                                for client in FREERDP_CLIENTS {
-                                    if std::process::Command::new(client).arg(&target).spawn().is_ok() {
-                                        break;
+                                let started = FREERDP_CLIENTS.iter().find(|client| {
+                                    std::process::Command::new(client).arg(&target).spawn().is_ok()
+                                });
+                                match started {
+                                    Some(client) => {
+                                        logging::event(format_args!("FreeRDP started: {client} {target}"));
                                     }
+                                    None => logging::event(format_args!(
+                                        "No FreeRDP client found (tried {})",
+                                        FREERDP_CLIENTS.join(", ")
+                                    )),
                                 }
                             });
                             self.notification_msg = Some("Opening the session in FreeRDP…".to_string());

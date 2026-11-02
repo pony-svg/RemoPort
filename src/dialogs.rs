@@ -1,6 +1,7 @@
 use crate::model::{
     AudioPlaybackMode, ColorQuality, DeviceBookmark, RedirectedFolder, ResolutionOption,
 };
+use crate::logging;
 use crate::theme::Theme;
 use egui::{vec2, Align2, Color32, Context, Ui, Window};
 use uuid::Uuid;
@@ -36,7 +37,9 @@ pub struct AddEditPcDialog {
     pub redirected_folders: Vec<RedirectedFolder>,
     pub new_folder_path: String,
     pub validation_error: Option<String>,
-    pub target_id: Option<Uuid>,
+    /// The PC being edited, so Save keeps what the dialog does not show
+    /// (favorite, last connection, identity). `None` when adding.
+    pub original: Option<DeviceBookmark>,
 }
 
 impl Default for AddEditPcDialog {
@@ -64,7 +67,7 @@ impl Default for AddEditPcDialog {
             redirected_folders: Vec::new(),
             new_folder_path: "".to_string(),
             validation_error: None,
-            target_id: None,
+            original: None,
         }
     }
 }
@@ -76,9 +79,15 @@ impl AddEditPcDialog {
         self.resolution = resolution;
         self.is_open = true;
         self.is_edit = false;
+        logging::event("Add PC dialog opened");
     }
 
     pub fn open_edit(&mut self, bookmark: &DeviceBookmark) {
+        logging::event(format_args!(
+            "Edit PC dialog opened for \"{}\" ({})",
+            bookmark.display_title(),
+            bookmark.pc_name
+        ));
         self.is_open = true;
         self.is_edit = true;
         self.active_tab = EditPcTab::General;
@@ -99,7 +108,7 @@ impl AddEditPcDialog {
         self.redirect_smartcards = bookmark.redirect_smartcards;
         self.redirect_webauthn = bookmark.redirect_webauthn;
         self.redirected_folders = bookmark.redirected_folders.clone();
-        self.target_id = Some(bookmark.id);
+        self.original = Some(bookmark.clone());
         self.validation_error = None;
     }
 
@@ -110,7 +119,11 @@ impl AddEditPcDialog {
 
         let title = if self.is_edit { "Edit PC" } else { "Add PC" };
 
+        // `is_open` is cleared by the window's ×; Save and Cancel set `close`.
+        // Both are applied after the window is drawn.
         let mut is_open = self.is_open;
+        let mut close = false;
+        let previous_tab = self.active_tab;
         Window::new(title)
             .open(&mut is_open)
             .collapsible(false)
@@ -150,15 +163,22 @@ impl AddEditPcDialog {
                         if ui.add(theme.primary_button("Save")).clicked() {
                             if self.pc_name.trim().is_empty() {
                                 self.validation_error = Some("PC name cannot be empty".to_string());
+                                logging::event(format_args!("{title}: Save refused, the PC name is empty"));
                             } else {
-                                let mut bookmark = DeviceBookmark::new(
+                                let fresh = DeviceBookmark::new(
                                     self.pc_name.trim().to_string(),
                                     self.friendly_name.trim().to_string(),
                                     self.group_name.trim().to_string(),
                                 );
-                                if let Some(id) = self.target_id {
-                                    bookmark.id = id;
-                                }
+                                let mut bookmark = match &self.original {
+                                    Some(original) => DeviceBookmark {
+                                        pc_name: fresh.pc_name,
+                                        friendly_name: fresh.friendly_name,
+                                        group_name: fresh.group_name,
+                                        ..original.clone()
+                                    },
+                                    None => fresh,
+                                };
                                 bookmark.username = self.username.trim().to_string();
                                 bookmark.resolution = self.resolution;
                                 bookmark.color_quality = self.color_quality;
@@ -174,19 +194,32 @@ impl AddEditPcDialog {
                                 bookmark.redirect_webauthn = self.redirect_webauthn;
                                 bookmark.redirected_folders = self.redirected_folders.clone();
 
+                                logging::event(format_args!(
+                                    "{title}: saved \"{}\" ({}) in group \"{}\"",
+                                    bookmark.display_title(),
+                                    bookmark.pc_name,
+                                    bookmark.group_name
+                                ));
                                 *on_save = Some(bookmark);
-                                self.is_open = false;
+                                close = true;
                             }
                         }
 
                         if ui.button("Cancel").clicked() {
-                            self.is_open = false;
+                            logging::event(format_args!("{title}: cancelled"));
+                            close = true;
                         }
                     });
                 });
             });
 
-        self.is_open = is_open;
+        if self.active_tab != previous_tab {
+            logging::event(format_args!("{title}: tab {:?}", self.active_tab));
+        }
+        if !is_open {
+            logging::event(format_args!("{title}: closed with ×"));
+        }
+        self.is_open = is_open && !close;
     }
 
     fn show_general_tab(&mut self, ui: &mut Ui) {
@@ -339,6 +372,7 @@ impl AddWorkspaceDialog {
         self.is_open = true;
         self.email_or_url.clear();
         self.validation_message = None;
+        logging::event("Workspace dialog opened");
     }
 
     pub fn show(&mut self, ctx: &Context, theme: &Theme) {
@@ -346,7 +380,9 @@ impl AddWorkspaceDialog {
             return;
         }
 
+        // As in the PC dialog: × clears `is_open`, Cancel sets `close`.
         let mut is_open = self.is_open;
+        let mut close = false;
         Window::new("Subscribe to a workspace")
             .open(&mut is_open)
             .collapsible(false)
@@ -374,20 +410,30 @@ impl AddWorkspaceDialog {
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.add(theme.primary_button("Subscribe")).clicked() {
-                            if self.email_or_url.trim().is_empty() {
+                            let entry = self.email_or_url.trim();
+                            if entry.is_empty() {
                                 self.validation_message = Some("Please enter an email or workspace URL".to_string());
+                                logging::event("Workspace dialog: Subscribe with nothing entered");
                             } else {
                                 self.validation_message = Some("Workspace subscriptions are not available yet in this preview.".to_string());
+                                let kind = if entry.contains("://") { "a feed URL" } else { "an email address" };
+                                logging::event(format_args!(
+                                    "Workspace dialog: Subscribe with {kind} (not available yet)"
+                                ));
                             }
                         }
 
                         if ui.button("Cancel").clicked() {
-                            self.is_open = false;
+                            logging::event("Workspace dialog: cancelled");
+                            close = true;
                         }
                     });
                 });
             });
 
-        self.is_open = is_open;
+        if !is_open {
+            logging::event("Workspace dialog: closed with ×");
+        }
+        self.is_open = is_open && !close;
     }
 }

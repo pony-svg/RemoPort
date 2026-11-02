@@ -224,11 +224,11 @@ impl AppStateData {
                     "json.unreadable-{}",
                     Utc::now().format("%Y%m%d%H%M%S")
                 ));
-                eprintln!(
-                    "Remoport: {} could not be read ({err}); moved it to {}",
+                crate::logging::event(format_args!(
+                    "{} could not be read ({err}); moved it to {}",
                     path.display(),
                     aside.display()
-                );
+                ));
                 let _ = std::fs::rename(path, &aside);
                 Self::default()
             }

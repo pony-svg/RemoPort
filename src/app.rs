@@ -106,7 +106,7 @@ impl RemoportApp {
                 .frame(egui::Frame::none().fill(self.theme.bg_dark))
                 .show(ctx, |ui| session.render(ui, &self.theme, &mut disconnect));
             if disconnect {
-                logging::event("Session closed");
+                // The session logs how it ended; nothing to add here.
                 self.active_session = None;
             }
         } else {

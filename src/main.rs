@@ -2,6 +2,7 @@ mod app;
 mod dialogs;
 mod fonts;
 mod icons;
+mod keymap;
 mod logging;
 mod model;
 mod session;
@@ -120,6 +121,8 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             fonts::install(&cc.egui_ctx);
+            // Ctrl +/−/0 belong to the remote session, not to zooming Remoport.
+            cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
             Ok(Box::new(AppRunner::new(screenshot_path)))
         }),
     )

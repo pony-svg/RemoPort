@@ -6,10 +6,12 @@ Remoport is a desktop client for reaching Windows PCs, remote desktops and the a
 your organization publishes, with a clean connection center: favorites, PCs and apps
 side by side, and workspaces that bring in what your organization offers.
 
-> **Status: early preview.** The connection center works; remote sessions do not
-> yet. Remoport will connect through the RDP engine of
-> [RustConn](https://github.com/totoshko88/RustConn) (IronRDP-based, GPL-3.0-or-later)
-> instead of writing one from scratch. Until then, a session can be opened in FreeRDP.
+> **Status: early preview.** Remote desktops open inside Remoport through the RDP
+> engine of [RustConn](https://github.com/totoshko88/RustConn) by Anton Isaiev
+> (IronRDP-based, GPL-3.0-or-later). This first phase covers the screen, keyboard and
+> mouse, and a desktop that follows the window's size; it still awaits testing against
+> real servers. Clipboard, sound and shared folders come next; meanwhile any session
+> can also be opened in FreeRDP.
 
 ## Build and run
 
@@ -38,10 +40,12 @@ remotos y las apps que publica tu organización, con un centro de conexiones cla
 favoritos, PCs y apps juntos, y espacios de trabajo que traen lo que tu organización
 te ofrece.
 
-> **Estado: vista previa.** El centro de conexiones funciona; las sesiones remotas
-> todavía no. Remoport se conectará con el motor RDP de
-> [RustConn](https://github.com/totoshko88/RustConn) en lugar de escribir uno desde
-> cero. Mientras tanto, una sesión se puede abrir en FreeRDP.
+> **Estado: vista previa.** Los escritorios remotos se abren dentro de Remoport con el
+> motor RDP de [RustConn](https://github.com/totoshko88/RustConn), de Anton Isaiev.
+> Esta primera fase cubre pantalla, teclado y ratón, y un escritorio que se ajusta al
+> tamaño de la ventana; falta probarla contra servidores reales. El portapapeles, el
+> sonido y las carpetas compartidas vienen después; mientras tanto, cualquier sesión
+> también se puede abrir en FreeRDP.
 
 Remoport es software libre bajo la **GNU GPL, versión 3 o posterior**. El nombre y el
 logo de Remoport no están cubiertos por esa licencia: consulta

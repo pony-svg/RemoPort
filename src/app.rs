@@ -104,7 +104,7 @@ impl RemoportApp {
             let mut disconnect = false;
             egui::CentralPanel::default()
                 .frame(egui::Frame::none().fill(self.theme.bg_dark))
-                .show(ctx, |ui| session.render(ui, &mut disconnect));
+                .show(ctx, |ui| session.render(ui, &self.theme, &mut disconnect));
             if disconnect {
                 logging::event("Session closed");
                 self.active_session = None;
@@ -1306,6 +1306,7 @@ impl RemoportApp {
             format!("Remoport {}", env!("CARGO_PKG_VERSION")),
             "Your remote computers and apps, from Linux.".to_string(),
             "Free software under the GNU GPL, version 3 or later.".to_string(),
+            "Connections use the RDP engine of RustConn, by Anton Isaiev.".to_string(),
         ] {
             ui.label(RichText::new(line).color(self.theme.text_secondary));
         }

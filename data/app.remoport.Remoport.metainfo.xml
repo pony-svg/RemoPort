@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Remoport contributors -->
+<component type="desktop-application">
+  <id>app.remoport.Remoport</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Remoport</name>
+  <summary>Connect to your remote computers and apps</summary>
+  <summary xml:lang="es">Conéctate a tus equipos y apps remotas</summary>
+  <developer id="app.remoport">
+    <name>Remoport contributors</name>
+  </developer>
+  <description>
+    <p>
+      Remoport brings your Windows PCs, remote desktops and the apps your organization
+      publishes into one connection center.
+    </p>
+    <p xml:lang="es">
+      Remoport reúne en un solo centro de conexiones tus PCs con Windows, tus escritorios
+      remotos y las apps que publica tu organización.
+    </p>
+    <ul>
+      <li>Favorites, PCs and apps side by side, in a grid or a list</li>
+      <li xml:lang="es">Favoritos, PCs y apps juntos, en cuadrícula o en lista</li>
+      <li>Per-PC display, sound, device and folder settings</li>
+      <li xml:lang="es">Ajustes de pantalla, sonido, dispositivos y carpetas para cada PC</li>
+      <li>Workspaces that bring in the PCs and apps your organization offers</li>
+      <li xml:lang="es">Espacios de trabajo que traen los PCs y apps que ofrece tu organización</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">app.remoport.Remoport.desktop</launchable>
+  <provides>
+    <binary>remoport</binary>
+  </provides>
+  <keywords>
+    <keyword>remote desktop</keyword>
+    <keyword>remote access</keyword>
+    <keyword>remote computer</keyword>
+    <keyword>RDP</keyword>
+    <keyword>Windows</keyword>
+    <keyword>RemoteApp</keyword>
+    <keyword xml:lang="es">escritorio remoto</keyword>
+    <keyword xml:lang="es">conexión remota</keyword>
+    <keyword xml:lang="es">acceso remoto</keyword>
+    <keyword xml:lang="es">equipo remoto</keyword>
+  </keywords>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-02">
+      <description>
+        <p>First preview: the connection center. Remote sessions open in FreeRDP for now.</p>
+      </description>
+    </release>
+  </releases>
+</component>

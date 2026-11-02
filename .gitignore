@@ -1,0 +1,8 @@
+/target
+
+# Private reference material extracted from a third-party binary ("Deep"
+# mode, for private use only). Never commit it: Remoport's UI must come from
+# its own design and clean-room observation.
+/MECHANICS.md
+/mechanics.json
+/shots/

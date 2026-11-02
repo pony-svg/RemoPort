@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=Remoport
+GenericName=Remote Desktop Client
+GenericName[es]=Cliente de escritorio remoto
+Comment=Connect to your remote computers and apps
+Comment[es]=Conéctate a tus equipos y apps remotas
+Exec=remoport
+Icon=app.remoport.Remoport
+Terminal=false
+Type=Application
+Categories=Network;RemoteAccess;
+Keywords=remote;remote desktop;remote access;remote computer;rdp;vnc;windows;remoteapp;workspace;
+Keywords[es]=remoto;escritorio remoto;conexión remota;acceso remoto;equipo remoto;conectarse a un equipo;rdp;windows;
+StartupWMClass=app.remoport.Remoport

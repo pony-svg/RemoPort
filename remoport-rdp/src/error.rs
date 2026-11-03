@@ -98,7 +98,9 @@ mod tests {
             "Connection finalize failed: [CredSSP] [kind: Credssp(Error { nstatus: Some(NStatusCode(0xc000006d)) })]"
         ));
         assert!(is_authentication_failure("STATUS_ACCOUNT_LOCKED_OUT"));
-        assert!(!is_authentication_failure("Connection refused (os error 111)"));
+        assert!(!is_authentication_failure(
+            "Connection refused (os error 111)"
+        ));
     }
 
     #[test]
@@ -109,7 +111,9 @@ mod tests {
         ));
         assert!(is_nla_refusal("SSL_REQUIRED_BY_SERVER"));
         // Other negotiation failures are not "no NLA".
-        assert!(!is_nla_refusal("[Negotiation(NegotiationFailure(FailureCode(2)))]"));
+        assert!(!is_nla_refusal(
+            "[Negotiation(NegotiationFailure(FailureCode(2)))]"
+        ));
         assert!(!is_nla_refusal("TLS upgrade failed"));
     }
 }

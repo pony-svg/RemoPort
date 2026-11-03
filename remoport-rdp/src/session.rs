@@ -105,7 +105,8 @@ fn is_message_channel_pdu(
     let Some(channel) = message_channel_id else {
         return false;
     };
-    ironrdp_pdu::mcs::decode_send_data_indication(payload).is_ok_and(|ctx| ctx.channel_id == channel)
+    ironrdp_pdu::mcs::decode_send_data_indication(payload)
+        .is_ok_and(|ctx| ctx.channel_id == channel)
 }
 
 /// Handles one output of the session; returns whether the session ended.
@@ -146,7 +147,9 @@ where
             let _ = events.send(Event::PointerHidden(false));
         }
         ActiveStageOutput::Terminate(reason) => {
-            let _ = events.send(Event::Progress(format!("The PC ended the session ({reason:?})")));
+            let _ = events.send(Event::Progress(format!(
+                "The PC ended the session ({reason:?})"
+            )));
             return Ok(true);
         }
         ActiveStageOutput::DeactivateAll => {
@@ -190,7 +193,8 @@ async fn reactivate<S>(
             ..
         } = sequence.connection_activation_state()
         {
-            *image = DecodedImage::new(PixelFormat::BgrA32, desktop_size.width, desktop_size.height);
+            *image =
+                DecodedImage::new(PixelFormat::BgrA32, desktop_size.width, desktop_size.height);
             let _ = stage.reactivate(
                 io_channel_id,
                 user_channel_id,
@@ -376,16 +380,47 @@ mod tests {
 
     #[test]
     fn regions_are_cut_to_the_image() {
-        let rect = clamp(Rect { x: 1270, y: 700, width: 64, height: 64 }, 1280, 720);
-        assert_eq!(rect, Rect { x: 1270, y: 700, width: 10, height: 20 });
-        let outside = clamp(Rect { x: 2000, y: 0, width: 5, height: 5 }, 1280, 720);
+        let rect = clamp(
+            Rect {
+                x: 1270,
+                y: 700,
+                width: 64,
+                height: 64,
+            },
+            1280,
+            720,
+        );
+        assert_eq!(
+            rect,
+            Rect {
+                x: 1270,
+                y: 700,
+                width: 10,
+                height: 20
+            }
+        );
+        let outside = clamp(
+            Rect {
+                x: 2000,
+                y: 0,
+                width: 5,
+                height: 5,
+            },
+            1280,
+            720,
+        );
         assert_eq!(outside.width, 0);
     }
 
     #[test]
     fn region_data_matches_its_rect() {
         let mut image = DecodedImage::new(PixelFormat::BgrA32, 4, 3);
-        let rect = Rect { x: 1, y: 1, width: 2, height: 2 };
+        let rect = Rect {
+            x: 1,
+            y: 1,
+            width: 2,
+            height: 2,
+        };
         assert_eq!(region_data(&image, rect).len(), 2 * 2 * 4);
         let _ = &mut image;
     }

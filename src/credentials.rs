@@ -53,16 +53,20 @@ pub fn lookup(pc: Uuid) -> Pending {
 
 /// Remembers `password` for `pc`, replacing any earlier one.
 pub fn save(pc: Uuid, password: Zeroizing<String>) -> Pending {
-    run(move || match entry(pc).and_then(|e| e.set_password(&password)) {
-        Ok(()) => Outcome::Saved,
-        Err(e) => Outcome::Failed(e.to_string()),
-    })
+    run(
+        move || match entry(pc).and_then(|e| e.set_password(&password)) {
+            Ok(()) => Outcome::Saved,
+            Err(e) => Outcome::Failed(e.to_string()),
+        },
+    )
 }
 
 /// Forgets the password remembered for `pc`; nothing remembered is fine.
 pub fn forget(pc: Uuid) -> Pending {
-    run(move || match entry(pc).and_then(|e| e.delete_credential()) {
-        Ok(()) | Err(keyring::Error::NoEntry) => Outcome::Forgotten,
-        Err(e) => Outcome::Failed(e.to_string()),
-    })
+    run(
+        move || match entry(pc).and_then(|e| e.delete_credential()) {
+            Ok(()) | Err(keyring::Error::NoEntry) => Outcome::Forgotten,
+            Err(e) => Outcome::Failed(e.to_string()),
+        },
+    )
 }

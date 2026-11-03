@@ -302,7 +302,10 @@ mod tests {
         AppStateData::save_to(&path, &json).expect("save");
         let loaded = AppStateData::load_from(&path);
 
-        assert_eq!(serde_json::to_string_pretty(&loaded).expect("serialize"), json);
+        assert_eq!(
+            serde_json::to_string_pretty(&loaded).expect("serialize"),
+            json
+        );
         assert!(!path.with_extension("partial").exists());
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -329,14 +332,20 @@ mod tests {
         let loaded = AppStateData::load_from(&path);
 
         assert!(loaded.bookmarks.is_empty());
-        assert!(!path.exists(), "the broken file must not stay where it gets overwritten");
+        assert!(
+            !path.exists(),
+            "the broken file must not stay where it gets overwritten"
+        );
         let kept: Vec<_> = std::fs::read_dir(&dir)
             .expect("list")
             .filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().contains("unreadable"))
             .collect();
         assert_eq!(kept.len(), 1);
-        assert_eq!(std::fs::read_to_string(kept[0].path()).expect("read"), "{ not json");
+        assert_eq!(
+            std::fs::read_to_string(kept[0].path()).expect("read"),
+            "{ not json"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

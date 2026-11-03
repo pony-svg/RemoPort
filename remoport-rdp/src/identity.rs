@@ -225,8 +225,10 @@ pub(crate) fn describe(
     let tbs = cert.tbs_certificate();
     let date = |time: x509_cert::time::Time| {
         let secs = i64::try_from(time.to_unix_duration().as_secs()).unwrap_or(i64::MAX);
-        chrono::DateTime::from_timestamp(secs, 0)
-            .map_or_else(|| "unknown".to_string(), |d| d.format("%Y-%m-%d").to_string())
+        chrono::DateTime::from_timestamp(secs, 0).map_or_else(
+            || "unknown".to_string(),
+            |d| d.format("%Y-%m-%d").to_string(),
+        )
     };
     CertificateInfo {
         host: host.to_string(),
@@ -354,7 +356,10 @@ mod tests {
     #[test]
     fn an_unverified_certificate_is_asked_about_then_remembered() {
         let chain = Err("self-signed".to_string());
-        assert_eq!(verdict(&chain, None, "AA"), Verdict::Ask(IdentityProblem::Unknown));
+        assert_eq!(
+            verdict(&chain, None, "AA"),
+            Verdict::Ask(IdentityProblem::Unknown)
+        );
         assert_eq!(verdict(&chain, Some("AA"), "AA"), Verdict::Remembered);
     }
 
@@ -379,13 +384,19 @@ mod tests {
 
         store.remember(&info("AA")).expect("remember");
         // Host names compare case-insensitively; the port is part of the key.
-        assert_eq!(store.trusted("pc01.example.com", 3389).as_deref(), Some("AA"));
+        assert_eq!(
+            store.trusted("pc01.example.com", 3389).as_deref(),
+            Some("AA")
+        );
         assert_eq!(store.trusted("pc01.example.com", 3390), None);
         let entries = store.entries();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].server, "pc01.example.com:3389");
 
-        let mode = std::fs::metadata(store.path()).expect("meta").permissions().mode();
+        let mode = std::fs::metadata(store.path())
+            .expect("meta")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
         let dir_mode = std::fs::metadata(dir.join("remoport"))
             .expect("meta")
@@ -407,7 +418,10 @@ mod tests {
         let store = TrustStore::new(&path);
         assert_eq!(store.trusted("pc01.example.com", 3389), None);
         let chain = Err("self-signed".to_string());
-        assert_eq!(verdict(&chain, None, "AA"), Verdict::Ask(IdentityProblem::Unknown));
+        assert_eq!(
+            verdict(&chain, None, "AA"),
+            Verdict::Ask(IdentityProblem::Unknown)
+        );
 
         // Trusting a server afterwards keeps the broken file aside.
         store.remember(&info("AA")).expect("remember");
@@ -417,7 +431,10 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains("unreadable"))
             .count();
         assert_eq!(kept, 1);
-        assert_eq!(store.trusted("pc01.example.com", 3389).as_deref(), Some("AA"));
+        assert_eq!(
+            store.trusted("pc01.example.com", 3389).as_deref(),
+            Some("AA")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

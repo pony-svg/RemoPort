@@ -46,7 +46,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 let inner: Vec<Pos2> = (0..5).map(|i| outline[2 * i + 1]).collect();
                 painter.add(Shape::convex_polygon(inner, color, Stroke::NONE));
                 for i in 0..5 {
-                    let tip = vec![outline[(2 * i + 9) % 10], outline[2 * i], outline[2 * i + 1]];
+                    let tip = vec![
+                        outline[(2 * i + 9) % 10],
+                        outline[2 * i],
+                        outline[2 * i + 1],
+                    ];
                     painter.add(Shape::convex_polygon(tip, color, Stroke::NONE));
                 }
             } else {
@@ -75,7 +79,10 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             for i in 0..8 {
                 let angle = i as f32 * std::f32::consts::FRAC_PI_4;
                 let dir = egui::vec2(angle.cos(), angle.sin());
-                painter.add(line(vec![center + dir * 7.0 * unit, center + dir * 9.5 * unit]));
+                painter.add(line(vec![
+                    center + dir * 7.0 * unit,
+                    center + dir * 9.5 * unit,
+                ]));
             }
         }
         Icon::Feedback => {
@@ -128,15 +135,25 @@ pub fn paint_logo(painter: &Painter, rect: Rect) {
     let unit = rect.width() / 128.0;
     let p = |x: f32, y: f32| rect.min + egui::vec2(x * unit, y * unit);
     let tile = Rect::from_min_max(p(8.0, 8.0), p(120.0, 120.0));
-    painter.rect_filled(tile, Rounding::same(26.0 * unit), Color32::from_rgb(0x1f, 0xa8, 0x9b));
+    painter.rect_filled(
+        tile,
+        Rounding::same(26.0 * unit),
+        Color32::from_rgb(0x1f, 0xa8, 0x9b),
+    );
     let white = Stroke::new(7.0 * unit, Color32::WHITE);
     painter.rect_stroke(
         Rect::from_min_max(p(28.0, 32.0), p(100.0, 84.0)),
         Rounding::same(8.0 * unit),
         white,
     );
-    painter.add(Shape::Path(PathShape::line(vec![p(52.0, 100.0), p(76.0, 100.0)], white)));
-    painter.add(Shape::Path(PathShape::line(vec![p(50.0, 58.0), p(72.0, 58.0)], white)));
+    painter.add(Shape::Path(PathShape::line(
+        vec![p(52.0, 100.0), p(76.0, 100.0)],
+        white,
+    )));
+    painter.add(Shape::Path(PathShape::line(
+        vec![p(50.0, 58.0), p(72.0, 58.0)],
+        white,
+    )));
     painter.add(Shape::Path(PathShape::line(
         vec![p(63.0, 48.0), p(73.0, 58.0), p(63.0, 68.0)],
         white,

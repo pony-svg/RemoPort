@@ -45,8 +45,9 @@ fn interleave_families(addrs: Vec<SocketAddr>) -> VecDeque<SocketAddr> {
     let Some(prefers_v6) = addrs.first().map(SocketAddr::is_ipv6) else {
         return VecDeque::new();
     };
-    let (preferred, other): (Vec<_>, Vec<_>) =
-        addrs.into_iter().partition(|addr| addr.is_ipv6() == prefers_v6);
+    let (preferred, other): (Vec<_>, Vec<_>) = addrs
+        .into_iter()
+        .partition(|addr| addr.is_ipv6() == prefers_v6);
     let mut interleaved = VecDeque::with_capacity(preferred.len() + other.len());
     let mut preferred = preferred.into_iter();
     let mut other = other.into_iter();

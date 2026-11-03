@@ -98,11 +98,20 @@ pub enum Event {
         problem: IdentityProblem,
         reply: TrustReply,
     },
-    Connected { width: u16, height: u16 },
+    Connected {
+        width: u16,
+        height: u16,
+    },
     /// The remote desktop changed size; frames that follow use it.
-    Resized { width: u16, height: u16 },
+    Resized {
+        width: u16,
+        height: u16,
+    },
     /// New pixels for `rect`, BGRA, row after row.
-    Frame { rect: Rect, bgra: Vec<u8> },
+    Frame {
+        rect: Rect,
+        bgra: Vec<u8>,
+    },
     /// The graphics mode the PC chose.
     Graphics(String),
     /// The desktop can now follow the window's size.

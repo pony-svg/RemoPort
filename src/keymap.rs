@@ -115,8 +115,17 @@ mod tests {
 
     #[test]
     fn navigation_keys_are_extended() {
-        for key in [Key::ArrowUp, Key::ArrowLeft, Key::Home, Key::Delete, Key::PageDown] {
-            assert!(scancode(key).is_some_and(|(_, extended)| extended), "{key:?}");
+        for key in [
+            Key::ArrowUp,
+            Key::ArrowLeft,
+            Key::Home,
+            Key::Delete,
+            Key::PageDown,
+        ] {
+            assert!(
+                scancode(key).is_some_and(|(_, extended)| extended),
+                "{key:?}"
+            );
         }
         assert_eq!(scancode(Key::Enter), Some((0x1C, false)));
     }

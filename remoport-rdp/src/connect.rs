@@ -15,7 +15,9 @@ use ironrdp_connector::{
 use ironrdp_dvc::DrdynvcClient;
 use ironrdp_egfx::client::GraphicsPipelineClient;
 use ironrdp_pdu::gcc::KeyboardType;
-use ironrdp_pdu::rdp::capability_sets::{BitmapCodecs, MajorPlatformType, client_codecs_capabilities};
+use ironrdp_pdu::rdp::capability_sets::{
+    BitmapCodecs, MajorPlatformType, client_codecs_capabilities,
+};
 use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
 use ironrdp_tokio::TokioFramed;
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
@@ -62,7 +64,9 @@ pub(crate) async fn connect(
     progress(format!(
         "Reached {} at {}",
         config.host,
-        stream.peer_addr().map_or_else(|_| "?".to_string(), |a| a.to_string())
+        stream
+            .peer_addr()
+            .map_or_else(|_| "?".to_string(), |a| a.to_string())
     ));
 
     // 2. The connector and its channels: display control (resizing) and the
@@ -77,7 +81,8 @@ pub(crate) async fn connect(
     });
     let (decoder, decoder_note) = gfx::h264_decoder();
     progress(decoder_note);
-    let graphics = GraphicsPipelineClient::new(Box::new(gfx::Handler::new(events.clone())), decoder);
+    let graphics =
+        GraphicsPipelineClient::new(Box::new(gfx::Handler::new(events.clone())), decoder);
     let drdynvc = DrdynvcClient::new()
         .with_dynamic_channel(display_control)
         .with_dynamic_channel(graphics);

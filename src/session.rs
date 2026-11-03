@@ -79,8 +79,7 @@ impl Screen {
     fn apply(&mut self, rect: RemoteRect, bgra: &[u8]) {
         let (x, y) = (usize::from(rect.x), usize::from(rect.y));
         let (w, h) = (usize::from(rect.width), usize::from(rect.height));
-        if w == 0 || h == 0 || x + w > self.width || y + h > self.height || bgra.len() < w * h * 4
-        {
+        if w == 0 || h == 0 || x + w > self.width || y + h > self.height || bgra.len() < w * h * 4 {
             return;
         }
         let region: Vec<u8> = bgra[..w * h * 4]
@@ -239,12 +238,20 @@ impl ActiveSession {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let connected = matches!(self.phase, Phase::Connected);
                 if ui
-                    .button(if connected { "❌ Disconnect" } else { "❌ Close" })
+                    .button(if connected {
+                        "❌ Disconnect"
+                    } else {
+                        "❌ Close"
+                    })
                     .clicked()
                 {
                     logging::event(format_args!(
                         "{} {}",
-                        if connected { "Disconnected from" } else { "Closed the session of" },
+                        if connected {
+                            "Disconnected from"
+                        } else {
+                            "Closed the session of"
+                        },
                         self.bookmark.pc_name
                     ));
                     *on_disconnect = true;
@@ -365,8 +372,8 @@ impl ActiveSession {
                                     .password(true)
                                     .desired_width(280.0),
                             );
-                            submit |= field.lost_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            submit |=
+                                field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         }
                         ui.end_row();
                         if self.saved && self.saved_password.is_none() {
@@ -394,11 +401,9 @@ impl ActiveSession {
             }
             ui.add_space(8.0);
             ui.label(
-                RichText::new(
-                    "Remoport confirms the PC's identity before your password is used.",
-                )
-                .size(12.0)
-                .color(theme.text_secondary),
+                RichText::new("Remoport confirms the PC's identity before your password is used.")
+                    .size(12.0)
+                    .color(theme.text_secondary),
             );
         });
     }
@@ -430,10 +435,22 @@ impl ActiveSession {
 
         logging::event(format_args!(
             "Connecting to {host}:{port} as {}{} at {width}×{height}{}{}",
-            if user.is_empty() { "(no user name)" } else { user },
+            if user.is_empty() {
+                "(no user name)"
+            } else {
+                user
+            },
             domain.map(|d| format!(", domain {d}")).unwrap_or_default(),
-            if self.used_saved_password { ", saved password" } else { "" },
-            if self.bookmark.allow_without_nla { ", NLA not required for this PC" } else { "" },
+            if self.used_saved_password {
+                ", saved password"
+            } else {
+                ""
+            },
+            if self.bookmark.allow_without_nla {
+                ", NLA not required for this PC"
+            } else {
+                ""
+            },
         ));
         self.session = Some(Session::start(ConnectConfig {
             host: host.to_string(),
@@ -625,9 +642,16 @@ impl ActiveSession {
             let (title, color) = if changed {
                 ("Warning: this PC's certificate changed", DANGER)
             } else {
-                ("Remoport cannot confirm this PC's identity", theme.text_primary)
+                (
+                    "Remoport cannot confirm this PC's identity",
+                    theme.text_primary,
+                )
             };
-            ui.label(RichText::new(title).font(crate::fonts::medium(21.0)).color(color));
+            ui.label(
+                RichText::new(title)
+                    .font(crate::fonts::medium(21.0))
+                    .color(color),
+            );
             ui.add_space(10.0);
             let explanation = if changed {
                 format!(
@@ -749,7 +773,8 @@ impl ActiveSession {
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
-        ui.painter().rect_filled(rect, Rounding::ZERO, Color32::BLACK);
+        ui.painter()
+            .rect_filled(rect, Rounding::ZERO, Color32::BLACK);
         let Some(screen) = &mut self.screen else {
             return;
         };
@@ -1029,7 +1054,10 @@ mod tests {
     #[test]
     fn host_and_port_are_split() {
         assert_eq!(split_host_port("pc.example.com"), ("pc.example.com", 3389));
-        assert_eq!(split_host_port("pc.example.com:3390"), ("pc.example.com", 3390));
+        assert_eq!(
+            split_host_port("pc.example.com:3390"),
+            ("pc.example.com", 3390)
+        );
         assert_eq!(split_host_port("10.0.0.5:abc"), ("10.0.0.5:abc", 3389));
         // A bare IPv6 address is not mistaken for host:port.
         assert_eq!(split_host_port("fe80::1"), ("fe80::1", 3389));
@@ -1055,7 +1083,12 @@ mod tests {
         let mut screen = Screen::new(4, 3);
         // A 2×1 BGRA region at (1, 2): blue then red.
         screen.apply(
-            RemoteRect { x: 1, y: 2, width: 2, height: 1 },
+            RemoteRect {
+                x: 1,
+                y: 2,
+                width: 2,
+                height: 1,
+            },
             &[255, 0, 0, 0, 0, 0, 255, 0],
         );
         let at = |x: usize, y: usize| &screen.rgba[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
@@ -1068,8 +1101,24 @@ mod tests {
     fn a_region_outside_the_screen_is_dropped() {
         let mut screen = Screen::new(4, 3);
         let before = screen.rgba.clone();
-        screen.apply(RemoteRect { x: 3, y: 0, width: 2, height: 1 }, &[1; 8]);
-        screen.apply(RemoteRect { x: 0, y: 0, width: 2, height: 2 }, &[1; 4]);
+        screen.apply(
+            RemoteRect {
+                x: 3,
+                y: 0,
+                width: 2,
+                height: 1,
+            },
+            &[1; 8],
+        );
+        screen.apply(
+            RemoteRect {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            &[1; 4],
+        );
         assert_eq!(screen.rgba, before);
     }
 

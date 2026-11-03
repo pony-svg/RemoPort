@@ -19,8 +19,8 @@ async fn main() {
         .nth(1)
         .and_then(|p| p.parse().ok())
         .unwrap_or(33890);
-    let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-        .expect("certificate");
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("certificate");
     println!(
         "listening on 127.0.0.1:{port}, certificate SHA-256 {}",
         remoport_rdp::fingerprint(certified.cert.der())

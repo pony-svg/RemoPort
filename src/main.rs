@@ -87,7 +87,10 @@ impl eframe::App for AppRunner {
 
             // Fallback safety timeout if no screenshot event arrives after 140 frames
             if self.frame_count >= 140 && !self.screenshot_taken {
-                eprintln!("Timeout waiting for screenshot event at frame {}", self.frame_count);
+                eprintln!(
+                    "Timeout waiting for screenshot event at frame {}",
+                    self.frame_count
+                );
                 std::process::exit(0);
             }
         }

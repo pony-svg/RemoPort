@@ -11,8 +11,8 @@ use std::sync::mpsc;
 use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineHandler};
 use ironrdp_egfx::decode::{H264Decoder, OpenH264Decoder};
 use ironrdp_egfx::pdu::{
-    CapabilitiesV103Flags, CapabilitiesV104Flags, CapabilitiesV107Flags, CapabilitiesV10Flags,
-    CapabilitiesV81Flags, CapabilitySet, GfxPdu,
+    CapabilitiesV10Flags, CapabilitiesV81Flags, CapabilitiesV103Flags, CapabilitiesV104Flags,
+    CapabilitiesV107Flags, CapabilitySet, GfxPdu,
 };
 
 use crate::Event;
@@ -36,7 +36,9 @@ impl Handler {
 
 impl GraphicsPipelineHandler for Handler {
     fn on_capabilities_confirmed(&mut self, caps: &CapabilitySet) {
-        let _ = self.events.send(Event::Graphics(mode_name(caps).to_string()));
+        let _ = self
+            .events
+            .send(Event::Graphics(mode_name(caps).to_string()));
     }
 
     fn on_reset_graphics(&mut self, width: u32, height: u32) {
@@ -94,7 +96,10 @@ fn mode_name(caps: &CapabilitySet) -> &'static str {
 pub(crate) fn h264_decoder() -> (Option<Box<dyn H264Decoder>>, String) {
     for path in openh264_candidates() {
         if let Ok(decoder) = OpenH264Decoder::from_library_path(&path) {
-            return (Some(Box::new(decoder)), format!("H.264 decoder: {}", path.display()));
+            return (
+                Some(Box::new(decoder)),
+                format!("H.264 decoder: {}", path.display()),
+            );
         }
     }
     (
@@ -109,7 +114,12 @@ fn openh264_candidates() -> Vec<PathBuf> {
         dirs.push(home.join(".local/share/remoport/openh264"));
         dirs.push(home.join(".local/share/rustconn/openh264"));
     }
-    for dir in ["/usr/lib", "/usr/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu"] {
+    for dir in [
+        "/usr/lib",
+        "/usr/lib64",
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu",
+    ] {
         dirs.push(PathBuf::from(dir));
     }
     let mut candidates: Vec<PathBuf> = std::env::var_os("REMOPORT_OPENH264")

@@ -1,7 +1,7 @@
+use crate::logging;
 use crate::model::{
     AudioPlaybackMode, ColorQuality, DeviceBookmark, RedirectedFolder, ResolutionOption,
 };
-use crate::logging;
 use crate::theme::Theme;
 use egui::{vec2, Align2, Color32, Context, Ui, Window};
 use uuid::Uuid;
@@ -138,7 +138,11 @@ impl AddEditPcDialog {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.active_tab, EditPcTab::General, "General");
                     ui.selectable_value(&mut self.active_tab, EditPcTab::Display, "Display");
-                    ui.selectable_value(&mut self.active_tab, EditPcTab::DevicesAudio, "Devices & Audio");
+                    ui.selectable_value(
+                        &mut self.active_tab,
+                        EditPcTab::DevicesAudio,
+                        "Devices & Audio",
+                    );
                     ui.selectable_value(&mut self.active_tab, EditPcTab::Folders, "Folders");
                 });
                 ui.separator();
@@ -166,7 +170,9 @@ impl AddEditPcDialog {
                         if ui.add(theme.primary_button("Save")).clicked() {
                             if self.pc_name.trim().is_empty() {
                                 self.validation_error = Some("PC name cannot be empty".to_string());
-                                logging::event(format_args!("{title}: Save refused, the PC name is empty"));
+                                logging::event(format_args!(
+                                    "{title}: Save refused, the PC name is empty"
+                                ));
                             } else {
                                 let fresh = DeviceBookmark::new(
                                     self.pc_name.trim().to_string(),
@@ -286,10 +292,26 @@ impl AddEditPcDialog {
         egui::ComboBox::from_label("Resolution")
             .selected_text(self.resolution.display_label())
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.resolution, ResolutionOption::Native, "Default for this display");
-                ui.selectable_value(&mut self.resolution, ResolutionOption::Fhd1080p, "1920 x 1080 (1080p)");
-                ui.selectable_value(&mut self.resolution, ResolutionOption::Qhd1440p, "2560 x 1440 (1440p)");
-                ui.selectable_value(&mut self.resolution, ResolutionOption::Uhd4k, "3840 x 2160 (4K UHD)");
+                ui.selectable_value(
+                    &mut self.resolution,
+                    ResolutionOption::Native,
+                    "Default for this display",
+                );
+                ui.selectable_value(
+                    &mut self.resolution,
+                    ResolutionOption::Fhd1080p,
+                    "1920 x 1080 (1080p)",
+                );
+                ui.selectable_value(
+                    &mut self.resolution,
+                    ResolutionOption::Qhd1440p,
+                    "2560 x 1440 (1440p)",
+                );
+                ui.selectable_value(
+                    &mut self.resolution,
+                    ResolutionOption::Uhd4k,
+                    "3840 x 2160 (4K UHD)",
+                );
             });
 
         ui.add_space(8.0);
@@ -300,22 +322,45 @@ impl AddEditPcDialog {
                 ColorQuality::Medium16Bit => "Medium (16 bit)",
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.color_quality, ColorQuality::High32Bit, "High (32 bit)");
-                ui.selectable_value(&mut self.color_quality, ColorQuality::Medium16Bit, "Medium (16 bit)");
+                ui.selectable_value(
+                    &mut self.color_quality,
+                    ColorQuality::High32Bit,
+                    "High (32 bit)",
+                );
+                ui.selectable_value(
+                    &mut self.color_quality,
+                    ColorQuality::Medium16Bit,
+                    "Medium (16 bit)",
+                );
             });
 
         ui.add_space(8.0);
         ui.checkbox(&mut self.fit_to_window, "Fit session to window");
         ui.checkbox(&mut self.use_all_monitors, "Use all monitors");
-        ui.checkbox(&mut self.hidpi_full_resolution, "Use full resolution on HiDPI displays");
+        ui.checkbox(
+            &mut self.hidpi_full_resolution,
+            "Use full resolution on HiDPI displays",
+        );
     }
 
     fn show_devices_audio_tab(&mut self, ui: &mut Ui) {
         ui.label("Audio playback:");
         ui.horizontal(|ui| {
-            ui.radio_value(&mut self.audio_playback, AudioPlaybackMode::LocalDevice, "Play on this device");
-            ui.radio_value(&mut self.audio_playback, AudioPlaybackMode::RemotePC, "Play on remote PC");
-            ui.radio_value(&mut self.audio_playback, AudioPlaybackMode::Disabled, "Don't play sound");
+            ui.radio_value(
+                &mut self.audio_playback,
+                AudioPlaybackMode::LocalDevice,
+                "Play on this device",
+            );
+            ui.radio_value(
+                &mut self.audio_playback,
+                AudioPlaybackMode::RemotePC,
+                "Play on remote PC",
+            );
+            ui.radio_value(
+                &mut self.audio_playback,
+                AudioPlaybackMode::Disabled,
+                "Don't play sound",
+            );
         });
 
         ui.add_space(10.0);
@@ -333,7 +378,11 @@ impl AddEditPcDialog {
         ui.add_space(6.0);
 
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.new_folder_path).hint_text("/home/user/Documents").desired_width(280.0));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_folder_path)
+                    .hint_text("/home/user/Documents")
+                    .desired_width(280.0),
+            );
             if ui.button("+ Add Folder").clicked() && !self.new_folder_path.trim().is_empty() {
                 self.redirected_folders.push(RedirectedFolder {
                     id: Uuid::new_v4(),
@@ -347,21 +396,26 @@ impl AddEditPcDialog {
         ui.add_space(8.0);
 
         let mut remove_index = None;
-        egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-            if self.redirected_folders.is_empty() {
-                ui.label(egui::RichText::new("No folders added yet.").color(Color32::from_rgb(140, 140, 140)));
-            } else {
-                for (i, folder) in self.redirected_folders.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("📁 {}", folder.path));
-                        ui.checkbox(&mut folder.read_only, "Read-only");
-                        if ui.button("❌").clicked() {
-                            remove_index = Some(i);
-                        }
-                    });
+        egui::ScrollArea::vertical()
+            .max_height(140.0)
+            .show(ui, |ui| {
+                if self.redirected_folders.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No folders added yet.")
+                            .color(Color32::from_rgb(140, 140, 140)),
+                    );
+                } else {
+                    for (i, folder) in self.redirected_folders.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("📁 {}", folder.path));
+                            ui.checkbox(&mut folder.read_only, "Read-only");
+                            if ui.button("❌").clicked() {
+                                remove_index = Some(i);
+                            }
+                        });
+                    }
                 }
-            }
-        });
+            });
 
         if let Some(idx) = remove_index {
             self.redirected_folders.remove(idx);

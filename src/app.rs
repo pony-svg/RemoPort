@@ -12,8 +12,8 @@ use crate::theme::{Appearance, Theme};
 use chrono::Utc;
 use egui::popup::{popup_below_widget, PopupCloseBehavior};
 use egui::{
-    pos2, vec2, Align, Align2, Color32, Context, CursorIcon, FontId, Layout, Margin, Painter,
-    Rect, Response, RichText, Rounding, Sense, Stroke, Ui,
+    pos2, vec2, Align, Align2, Color32, Context, CursorIcon, FontId, Layout, Margin, Painter, Rect,
+    Response, RichText, Rounding, Sense, Stroke, Ui,
 };
 
 /// Project pages linked from the rail, the header and Settings.
@@ -58,7 +58,9 @@ impl RemoportApp {
     /// Starts with the state saved by the previous run.
     pub fn load() -> Self {
         if let Err(err) = secure_config_dir() {
-            logging::event(format_args!("Could not make the configuration folder private: {err}"));
+            logging::event(format_args!(
+                "Could not make the configuration folder private: {err}"
+            ));
         }
         let state = AppStateData::load();
         logging::event(format_args!(
@@ -121,12 +123,16 @@ impl RemoportApp {
                 .frame(egui::Frame::none().fill(self.theme.sidebar_bg))
                 .show(ctx, |ui| self.show_rail(ui));
             egui::CentralPanel::default()
-                .frame(egui::Frame::none().fill(self.theme.bg_dark).inner_margin(Margin {
-                    left: 32.0,
-                    right: 28.0,
-                    top: 22.0,
-                    bottom: 0.0,
-                }))
+                .frame(
+                    egui::Frame::none()
+                        .fill(self.theme.bg_dark)
+                        .inner_margin(Margin {
+                            left: 32.0,
+                            right: 28.0,
+                            top: 22.0,
+                            bottom: 0.0,
+                        }),
+                )
                 .show(ctx, |ui| self.show_page(ui));
         }
 
@@ -195,7 +201,10 @@ impl RemoportApp {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(FEEDBACK_URL));
             }
             let settings = self.state.active_tab == NavTab::Settings;
-            if self.rail_item(ui, Icon::Gear, "Settings", settings).clicked() {
+            if self
+                .rail_item(ui, Icon::Gear, "Settings", settings)
+                .clicked()
+            {
                 self.open_page(NavTab::Settings);
             }
         });
@@ -207,7 +216,10 @@ impl RemoportApp {
         if selected {
             painter.rect_filled(rect, Rounding::same(8.0), self.theme.nav_selected);
             painter.rect_filled(
-                Rect::from_min_size(pos2(rect.left() - 6.0, rect.center().y - 11.0), vec2(3.0, 22.0)),
+                Rect::from_min_size(
+                    pos2(rect.left() - 6.0, rect.center().y - 11.0),
+                    vec2(3.0, 22.0),
+                ),
                 Rounding::same(2.0),
                 self.theme.accent,
             );
@@ -306,7 +318,10 @@ impl RemoportApp {
                     .clone()
                     .unwrap_or_else(|| "Published by your workspaces".to_string()),
             ),
-            NavTab::Settings => ("Settings", format!("Remoport {}", env!("CARGO_PKG_VERSION"))),
+            NavTab::Settings => (
+                "Settings",
+                format!("Remoport {}", env!("CARGO_PKG_VERSION")),
+            ),
         };
 
         ui.horizontal(|ui| {
@@ -372,7 +387,11 @@ impl RemoportApp {
             SortOption::TimeLastConnected,
             "Last connected",
         );
-        ui.selectable_value(&mut self.state.sort_option, SortOption::Manual, "Order added");
+        ui.selectable_value(
+            &mut self.state.sort_option,
+            SortOption::Manual,
+            "Order added",
+        );
     }
 
     fn account_button(&mut self, ui: &mut Ui) {
@@ -388,22 +407,28 @@ impl RemoportApp {
             logging::event("Account menu opened");
             ui.memory_mut(|m| m.toggle_popup(menu));
         }
-        popup_below_widget(ui, menu, &response, PopupCloseBehavior::CloseOnClick, |ui| {
-            ui.set_min_width(240.0);
-            ui.label(
-                RichText::new(&self.state.user_account.display_name)
-                    .font(fonts::medium(14.0))
-                    .color(self.theme.text_primary),
-            );
-            ui.label(
-                RichText::new(&self.state.user_account.email).color(self.theme.text_secondary),
-            );
-            ui.separator();
-            if ui.button("Sign in to an organization…").clicked() {
-                logging::event("Account menu: Sign in to an organization");
-                self.add_workspace_dialog.open();
-            }
-        });
+        popup_below_widget(
+            ui,
+            menu,
+            &response,
+            PopupCloseBehavior::CloseOnClick,
+            |ui| {
+                ui.set_min_width(240.0);
+                ui.label(
+                    RichText::new(&self.state.user_account.display_name)
+                        .font(fonts::medium(14.0))
+                        .color(self.theme.text_primary),
+                );
+                ui.label(
+                    RichText::new(&self.state.user_account.email).color(self.theme.text_secondary),
+                );
+                ui.separator();
+                if ui.button("Sign in to an organization…").clicked() {
+                    logging::event("Account menu: Sign in to an organization");
+                    self.add_workspace_dialog.open();
+                }
+            },
+        );
     }
 
     fn icon_button(&self, ui: &mut Ui, icon: Icon, tooltip: &str) -> Response {
@@ -432,16 +457,20 @@ impl RemoportApp {
             .inner_margin(Margin::symmetric(8.0, 5.0))
             .show(ui, |ui| {
                 // Explicitly left to right: the header around it runs right to left.
-                ui.allocate_ui_with_layout(vec2(220.0, 22.0), Layout::left_to_right(Align::Center), |ui| {
-                    let (icon, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                    icons::paint(ui.painter(), icon, Icon::Search, self.theme.text_secondary);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.search_query)
-                            .frame(false)
-                            .hint_text("Search")
-                            .desired_width(f32::INFINITY),
-                    );
-                });
+                ui.allocate_ui_with_layout(
+                    vec2(220.0, 22.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        let (icon, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                        icons::paint(ui.painter(), icon, Icon::Search, self.theme.text_secondary);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.search_query)
+                                .frame(false)
+                                .hint_text("Search")
+                                .desired_width(f32::INFINITY),
+                        );
+                    },
+                );
             });
     }
 
@@ -455,9 +484,9 @@ impl RemoportApp {
         } else {
             self.theme.text_primary
         };
-        let galley = ui
-            .painter()
-            .layout_no_wrap(text.to_owned(), FontId::proportional(13.0), text_color);
+        let galley =
+            ui.painter()
+                .layout_no_wrap(text.to_owned(), FontId::proportional(13.0), text_color);
         let width = galley.size().x + 26.0 + if dropdown { 18.0 } else { 0.0 };
         let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
         let painter = ui.painter();
@@ -474,7 +503,10 @@ impl RemoportApp {
         if dropdown {
             icons::paint(
                 painter,
-                Rect::from_center_size(pos2(rect.right() - 17.0, rect.center().y), vec2(14.0, 14.0)),
+                Rect::from_center_size(
+                    pos2(rect.right() - 17.0, rect.center().y),
+                    vec2(14.0, 14.0),
+                ),
                 Icon::ChevronDown,
                 text_color,
             );
@@ -506,7 +538,9 @@ impl RemoportApp {
             popup_below_widget(ui, menu, &chip, PopupCloseBehavior::CloseOnClick, |ui| {
                 ui.set_min_width(180.0);
                 if options.is_empty() {
-                    ui.label(RichText::new("Nothing to filter by yet").color(self.theme.text_secondary));
+                    ui.label(
+                        RichText::new("Nothing to filter by yet").color(self.theme.text_secondary),
+                    );
                 }
                 for option in options {
                     if ui
@@ -545,7 +579,13 @@ impl RemoportApp {
         workspaces.sort_by_key(|w| w.to_lowercase());
         workspaces.dedup();
         let mut filter = self.workspace_filter.take();
-        self.filter_chips(ui, "workspace_filter", "Workspace", &workspaces, &mut filter);
+        self.filter_chips(
+            ui,
+            "workspace_filter",
+            "Workspace",
+            &workspaces,
+            &mut filter,
+        );
         self.workspace_filter = filter;
     }
 
@@ -568,7 +608,11 @@ impl RemoportApp {
             chevron,
             self.theme.text_secondary,
         );
-        let title = painter.layout_no_wrap(title.to_owned(), fonts::medium(14.0), self.theme.text_primary);
+        let title = painter.layout_no_wrap(
+            title.to_owned(),
+            fonts::medium(14.0),
+            self.theme.text_primary,
+        );
         let title_width = title.size().x;
         painter.galley(
             pos2(rect.left() + 24.0, rect.center().y - title.size().y / 2.0),
@@ -582,10 +626,7 @@ impl RemoportApp {
             FontId::proportional(12.0),
             self.theme.text_secondary,
         );
-        if response
-            .on_hover_cursor(CursorIcon::PointingHand)
-            .clicked()
-        {
+        if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
             if open {
                 logging::event(format_args!("Folded {key}"));
                 self.state.collapsed_groups.push(key.to_string());
@@ -600,10 +641,13 @@ impl RemoportApp {
 
     /// Lays cards out left to right, wrapping, with their tops aligned.
     fn card_row(ui: &mut Ui, add_cards: impl FnOnce(&mut Ui)) {
-        ui.with_layout(Layout::left_to_right(Align::TOP).with_main_wrap(true), |ui| {
-            ui.spacing_mut().item_spacing = vec2(16.0, 16.0);
-            add_cards(ui);
-        });
+        ui.with_layout(
+            Layout::left_to_right(Align::TOP).with_main_wrap(true),
+            |ui| {
+                ui.spacing_mut().item_spacing = vec2(16.0, 16.0);
+                add_cards(ui);
+            },
+        );
     }
 
     fn show_empty_state(
@@ -681,8 +725,14 @@ impl RemoportApp {
             let painter = ui.painter();
             let y = rule.center().y;
             let stroke = Stroke::new(1.0_f32, self.theme.card_border);
-            painter.line_segment([pos2(rule.left(), y), pos2(rule.center().x - 16.0, y)], stroke);
-            painter.line_segment([pos2(rule.center().x + 16.0, y), pos2(rule.right(), y)], stroke);
+            painter.line_segment(
+                [pos2(rule.left(), y), pos2(rule.center().x - 16.0, y)],
+                stroke,
+            );
+            painter.line_segment(
+                [pos2(rule.center().x + 16.0, y), pos2(rule.right(), y)],
+                stroke,
+            );
             painter.text(
                 rule.center(),
                 Align2::CENTER_CENTER,
@@ -819,7 +869,11 @@ impl RemoportApp {
                     || b.pc_name.to_lowercase().contains(&query)
                     || b.friendly_name.to_lowercase().contains(&query)
             })
-            .filter(|b| self.group_filter.as_ref().is_none_or(|g| *g == b.group_name))
+            .filter(|b| {
+                self.group_filter
+                    .as_ref()
+                    .is_none_or(|g| *g == b.group_name)
+            })
             .cloned()
             .collect();
         if pcs.is_empty() {
@@ -858,7 +912,11 @@ impl RemoportApp {
     }
 
     fn paint_thumbnail(&self, painter: &Painter, thumb: Rect) {
-        painter.add(icons::gradient_rect(thumb, self.theme.thumb_from, self.theme.thumb_to));
+        painter.add(icons::gradient_rect(
+            thumb,
+            self.theme.thumb_from,
+            self.theme.thumb_to,
+        ));
         let clipped = painter.with_clip_rect(thumb);
         clipped.circle_filled(
             pos2(thumb.right() - 40.0, thumb.top() + 26.0),
@@ -894,12 +952,19 @@ impl RemoportApp {
         } else {
             self.theme.card_border
         };
-        painter.rect(rect, Rounding::same(10.0), self.theme.card_bg, Stroke::new(1.0_f32, border));
+        painter.rect(
+            rect,
+            Rounding::same(10.0),
+            self.theme.card_bg,
+            Stroke::new(1.0_f32, border),
+        );
 
-        let thumb = Rect::from_min_size(rect.min + vec2(6.0, 6.0), vec2(rect.width() - 12.0, 130.0));
+        let thumb =
+            Rect::from_min_size(rect.min + vec2(6.0, 6.0), vec2(rect.width() - 12.0, 130.0));
         self.paint_thumbnail(&painter, thumb);
         if pc.is_favorite {
-            let badge = Rect::from_center_size(thumb.right_top() + vec2(-18.0, 18.0), vec2(18.0, 18.0));
+            let badge =
+                Rect::from_center_size(thumb.right_top() + vec2(-18.0, 18.0), vec2(18.0, 18.0));
             painter.circle_filled(badge.center(), 13.0, self.theme.card_bg);
             icons::paint(&painter, badge, Icon::StarFilled, FAVORITE);
         }
@@ -919,7 +984,10 @@ impl RemoportApp {
             self.theme.text_secondary,
         );
 
-        let more_rect = Rect::from_center_size(pos2(rect.right() - 24.0, thumb.bottom() + 33.0), vec2(30.0, 30.0));
+        let more_rect = Rect::from_center_size(
+            pos2(rect.right() - 24.0, thumb.bottom() + 33.0),
+            vec2(30.0, 30.0),
+        );
         let more = ui
             .interact(more_rect, response.id.with("more"), Sense::click())
             .on_hover_text("More actions")
@@ -927,7 +995,12 @@ impl RemoportApp {
         if more.hovered() {
             painter.rect_filled(more_rect, Rounding::same(6.0), self.theme.nav_hover);
         }
-        icons::paint(&painter, more_rect.shrink(7.0), Icon::More, self.theme.text_secondary);
+        icons::paint(
+            &painter,
+            more_rect.shrink(7.0),
+            Icon::More,
+            self.theme.text_secondary,
+        );
 
         let menu = response.id.with("menu");
         if more.clicked() {
@@ -964,10 +1037,7 @@ impl RemoportApp {
             ui.close_menu();
         }
         ui.separator();
-        if ui
-            .button(RichText::new("Delete…").color(DANGER))
-            .clicked()
-        {
+        if ui.button(RichText::new("Delete…").color(DANGER)).clicked() {
             logging::event(format_args!(
                 "Delete requested for \"{}\" ({})",
                 pc.display_title(),
@@ -996,7 +1066,8 @@ impl RemoportApp {
                 ));
                 ui.add_space(12.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let delete = egui::Button::new(RichText::new("Delete").color(Color32::WHITE)).fill(DANGER);
+                    let delete = egui::Button::new(RichText::new("Delete").color(Color32::WHITE))
+                        .fill(DANGER);
                     if ui.add(delete).clicked() {
                         decision = Some(true);
                     }
@@ -1007,14 +1078,21 @@ impl RemoportApp {
             });
         match decision {
             Some(true) => {
-                logging::event(format_args!("Deleted \"{}\" ({})", pc.display_title(), pc.pc_name));
+                logging::event(format_args!(
+                    "Deleted \"{}\" ({})",
+                    pc.display_title(),
+                    pc.pc_name
+                ));
                 self.state.bookmarks.retain(|b| b.id != pc.id);
                 // Its remembered password, if any, goes with it.
                 let _ = credentials::forget(pc.id);
                 self.pending_delete = None;
             }
             Some(false) => {
-                logging::event(format_args!("Kept \"{}\": delete cancelled", pc.display_title()));
+                logging::event(format_args!(
+                    "Kept \"{}\": delete cancelled",
+                    pc.display_title()
+                ));
                 self.pending_delete = None;
             }
             None => {}
@@ -1030,7 +1108,13 @@ impl RemoportApp {
             .striped(true)
             .spacing([18.0, 10.0])
             .show(ui, |ui| {
-                for header in ["Name", "Name or address", "Resolution", "Last connected", ""] {
+                for header in [
+                    "Name",
+                    "Name or address",
+                    "Resolution",
+                    "Last connected",
+                    "",
+                ] {
                     ui.label(RichText::new(header).color(self.theme.text_secondary));
                 }
                 ui.end_row();
@@ -1082,13 +1166,24 @@ impl RemoportApp {
     fn toggle_favorite(&mut self, id: uuid::Uuid) {
         if let Some(pc) = self.state.bookmarks.iter_mut().find(|b| b.id == id) {
             pc.is_favorite = !pc.is_favorite;
-            let change = if pc.is_favorite { "Added to" } else { "Removed from" };
-            logging::event(format_args!("{change} favorites: \"{}\"", pc.display_title()));
+            let change = if pc.is_favorite {
+                "Added to"
+            } else {
+                "Removed from"
+            };
+            logging::event(format_args!(
+                "{change} favorites: \"{}\"",
+                pc.display_title()
+            ));
         }
     }
 
     fn connect_to(&mut self, pc: &DeviceBookmark) {
-        logging::event(format_args!("Connect to \"{}\" ({})", pc.display_title(), pc.pc_name));
+        logging::event(format_args!(
+            "Connect to \"{}\" ({})",
+            pc.display_title(),
+            pc.pc_name
+        ));
         let mut updated_pc = pc.clone();
         updated_pc.last_connected = Some(Utc::now());
         if let Some(pos) = self.state.bookmarks.iter().position(|b| b.id == pc.id) {
@@ -1117,7 +1212,11 @@ impl RemoportApp {
             .remote_apps
             .iter()
             .filter(|a| query.is_empty() || a.name.to_lowercase().contains(&query))
-            .filter(|a| self.workspace_filter.as_ref().is_none_or(|w| *w == a.workspace_name))
+            .filter(|a| {
+                self.workspace_filter
+                    .as_ref()
+                    .is_none_or(|w| *w == a.workspace_name)
+            })
             .cloned()
             .collect();
         if apps.is_empty() {
@@ -1134,7 +1233,10 @@ impl RemoportApp {
 
         let mut workspaces: Vec<(String, Vec<RemoteAppItem>)> = Vec::new();
         for app in apps {
-            match workspaces.iter_mut().find(|(name, _)| *name == app.workspace_name) {
+            match workspaces
+                .iter_mut()
+                .find(|(name, _)| *name == app.workspace_name)
+            {
                 Some((_, list)) => list.push(app),
                 None => workspaces.push((app.workspace_name.clone(), vec![app])),
             }
@@ -1159,9 +1261,15 @@ impl RemoportApp {
         } else {
             self.theme.card_border
         };
-        painter.rect(rect, Rounding::same(10.0), self.theme.card_bg, Stroke::new(1.0_f32, border));
+        painter.rect(
+            rect,
+            Rounding::same(10.0),
+            self.theme.card_bg,
+            Stroke::new(1.0_f32, border),
+        );
 
-        let tile = Rect::from_center_size(pos2(rect.center().x, rect.top() + 44.0), vec2(52.0, 52.0));
+        let tile =
+            Rect::from_center_size(pos2(rect.center().x, rect.top() + 44.0), vec2(52.0, 52.0));
         painter.rect_filled(tile, Rounding::same(12.0), self.theme.accent);
         match app.icon_name.as_str() {
             "terminal" => {
@@ -1225,7 +1333,10 @@ impl RemoportApp {
     }
 
     fn open_app(&mut self, app: &RemoteAppItem) {
-        logging::event(format_args!("Open app \"{}\" from \"{}\"", app.name, app.workspace_name));
+        logging::event(format_args!(
+            "Open app \"{}\" from \"{}\"",
+            app.name, app.workspace_name
+        ));
         let mut session = ActiveSession::new(
             DeviceBookmark::new(app.workspace_name.clone(), app.name.clone(), String::new()),
             false,
@@ -1300,7 +1411,9 @@ impl RemoportApp {
             });
         if let Some(server) = forget {
             match store.forget(&server) {
-                Ok(()) => logging::event(format_args!("Stopped trusting the certificate of {server}")),
+                Ok(()) => {
+                    logging::event(format_args!("Stopped trusting the certificate of {server}"))
+                }
                 Err(err) => logging::event(format_args!("Could not forget {server}: {err}")),
             }
         }
@@ -1327,22 +1440,24 @@ impl RemoportApp {
         ui.add_space(26.0);
         self.settings_heading(ui, "New PCs");
         let resolution = self.state.default_resolution;
-        egui::ComboBox::from_label(RichText::new("Resolution for PCs you add").color(self.theme.text_secondary))
-            .selected_text(self.state.default_resolution.display_label())
-            .show_ui(ui, |ui| {
-                for option in [
-                    ResolutionOption::Native,
-                    ResolutionOption::Fhd1080p,
-                    ResolutionOption::Qhd1440p,
-                    ResolutionOption::Uhd4k,
-                ] {
-                    ui.selectable_value(
-                        &mut self.state.default_resolution,
-                        option,
-                        option.display_label(),
-                    );
-                }
-            });
+        egui::ComboBox::from_label(
+            RichText::new("Resolution for PCs you add").color(self.theme.text_secondary),
+        )
+        .selected_text(self.state.default_resolution.display_label())
+        .show_ui(ui, |ui| {
+            for option in [
+                ResolutionOption::Native,
+                ResolutionOption::Fhd1080p,
+                ResolutionOption::Qhd1440p,
+                ResolutionOption::Uhd4k,
+            ] {
+                ui.selectable_value(
+                    &mut self.state.default_resolution,
+                    option,
+                    option.display_label(),
+                );
+            }
+        });
         if self.state.default_resolution != resolution {
             logging::event(format_args!(
                 "Resolution for new PCs: {}",

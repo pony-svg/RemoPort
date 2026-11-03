@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use ironrdp_pdu::nego::{ConnectionConfirm, FailureCode, ResponseFlags, SecurityProtocol};
 use ironrdp_pdu::x224::X224;
-use remoport_rdp::{ConnectConfig, Error, Event, IdentityProblem, Session, TrustStore, fingerprint};
+use remoport_rdp::{
+    ConnectConfig, Error, Event, IdentityProblem, Session, TrustStore, fingerprint,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -113,7 +115,12 @@ async fn an_untrusted_server_receives_nothing_after_tls() {
     let (dir, store) = scratch_store("reject");
     let session = Session::start(config(port, &store));
 
-    let Event::VerifyIdentity { info, problem, reply } = next_event(&session).await else {
+    let Event::VerifyIdentity {
+        info,
+        problem,
+        reply,
+    } = next_event(&session).await
+    else {
         panic!("expected the identity question");
     };
     assert_eq!(problem, IdentityProblem::Unknown);
@@ -121,9 +128,15 @@ async fn an_untrusted_server_receives_nothing_after_tls() {
     assert!(!info.why_unverified.is_empty());
     reply.answer(false);
 
-    assert!(matches!(next_event(&session).await, Event::Ended(Some(Error::IdentityRejected))));
+    assert!(matches!(
+        next_event(&session).await,
+        Event::Ended(Some(Error::IdentityRejected))
+    ));
     let after_tls = received.await.expect("server report");
-    assert!(after_tls.is_empty(), "no CredSSP byte may reach an untrusted server");
+    assert!(
+        after_tls.is_empty(),
+        "no CredSSP byte may reach an untrusted server"
+    );
     assert_eq!(store.trusted("localhost", port), None);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -141,7 +154,11 @@ async fn a_trusted_server_gets_credssp_and_is_remembered() {
 
     let after_tls = received.await.expect("server report");
     // CredSSP opens with a TSRequest, an ASN.1 SEQUENCE.
-    assert_eq!(after_tls.first(), Some(&0x30), "CredSSP starts only after trust");
+    assert_eq!(
+        after_tls.first(),
+        Some(&0x30),
+        "CredSSP starts only after trust"
+    );
     assert_eq!(store.trusted("localhost", port), Some(fingerprint(&der)));
     drop(session);
     let _ = std::fs::remove_dir_all(dir);
@@ -176,7 +193,10 @@ async fn a_changed_certificate_is_reported_as_changed() {
         }
     );
     reply.answer(false);
-    assert!(matches!(next_event(&session).await, Event::Ended(Some(Error::IdentityRejected))));
+    assert!(matches!(
+        next_event(&session).await,
+        Event::Ended(Some(Error::IdentityRejected))
+    ));
     assert!(received.await.expect("server report").is_empty());
     // The certificate the user trusted is kept.
     assert_eq!(store.trusted("localhost", port).as_deref(), Some("AA:BB"));

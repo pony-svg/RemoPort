@@ -14,7 +14,7 @@ use ironrdp_connector::{
 };
 use ironrdp_dvc::DrdynvcClient;
 use ironrdp_egfx::client::GraphicsPipelineClient;
-use ironrdp_pdu::gcc::KeyboardType;
+use ironrdp_pdu::gcc::{self, KeyboardType};
 use ironrdp_pdu::rdp::capability_sets::{
     BitmapCodecs, MajorPlatformType, client_codecs_capabilities,
 };
@@ -354,6 +354,7 @@ fn connector_config(
     sound: bool,
     microphone: bool,
 ) -> Config {
+    let (desktop, monitor_layout) = screens(config);
     let credentials = Credentials::UsernamePassword {
         username: config.username.clone(),
         // IronRDP needs an owned String; that copy is IronRDP's to keep.
@@ -372,12 +373,9 @@ fn connector_config(
         keyboard_layout,
         ime_file_name: String::new(),
         dig_product_id: String::new(),
-        desktop_size: DesktopSize {
-            width: config.width,
-            height: config.height,
-        },
+        desktop_size: desktop,
         desktop_scale_factor: 100,
-        monitor_layout: None,
+        monitor_layout,
         monitor_extended_layout: None,
         desktop_physical_size: None,
         desktop_orientation: None,
@@ -430,6 +428,53 @@ fn with_resume(connector: ClientConnector, resume: Option<&ResumeCookie>) -> Cli
     })
 }
 
+/// The desktop size and, for several screens, where each lies: side by
+/// side, left to right, the first one primary.
+fn screens(config: &ConnectConfig) -> (DesktopSize, Option<gcc::ClientMonitorData>) {
+    if config.monitors.len() < 2 {
+        let desktop = DesktopSize {
+            width: config.width,
+            height: config.height,
+        };
+        return (desktop, None);
+    }
+    let mut left = 0i32;
+    let monitors = config
+        .monitors
+        .iter()
+        .enumerate()
+        .map(|(index, &(width, height))| {
+            let monitor = gcc::Monitor {
+                left,
+                top: 0,
+                right: left + i32::from(width) - 1,
+                bottom: i32::from(height) - 1,
+                flags: if index == 0 {
+                    gcc::MonitorFlags::PRIMARY
+                } else {
+                    gcc::MonitorFlags::empty()
+                },
+            };
+            left += i32::from(width);
+            monitor
+        })
+        .collect();
+    let desktop = DesktopSize {
+        width: config
+            .monitors
+            .iter()
+            .map(|&(width, _)| width)
+            .fold(0u16, u16::saturating_add),
+        height: config
+            .monitors
+            .iter()
+            .map(|&(_, height)| height)
+            .max()
+            .unwrap_or(0),
+    };
+    (desktop, Some(gcc::ClientMonitorData { monitors }))
+}
+
 fn timezone_info() -> TimezoneInfo {
     let offset = chrono::Local::now().offset().local_minus_utc();
     TimezoneInfo {
@@ -451,6 +496,7 @@ mod tests {
             password: zeroize::Zeroizing::new(String::new()),
             width: 1280,
             height: 720,
+            monitors: Vec::new(),
             allow_without_nla: false,
             trust_store: crate::TrustStore::new(std::env::temp_dir().join("unused.json")),
             timeout: Duration::from_secs(1),
@@ -463,6 +509,25 @@ mod tests {
             kerberos: None,
             resume: None,
         }
+    }
+
+    #[test]
+    fn several_screens_sit_side_by_side_the_first_primary() {
+        let mut two = config();
+        two.monitors = vec![(1920, 1080), (1280, 1024)];
+        let (desktop, layout) = screens(&two);
+        assert_eq!((desktop.width, desktop.height), (3200, 1080));
+        let monitors = layout.expect("a layout").monitors;
+        assert_eq!((monitors[0].left, monitors[0].right), (0, 1919));
+        assert_eq!(
+            (monitors[1].left, monitors[1].right, monitors[1].bottom),
+            (1920, 3199, 1023)
+        );
+        assert!(monitors[0].flags.contains(gcc::MonitorFlags::PRIMARY));
+        assert!(!monitors[1].flags.contains(gcc::MonitorFlags::PRIMARY));
+        let (one, none) = screens(&config());
+        assert_eq!((one.width, one.height), (1280, 720));
+        assert!(none.is_none());
     }
 
     #[test]

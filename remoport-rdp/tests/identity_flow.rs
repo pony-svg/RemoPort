@@ -75,6 +75,7 @@ fn config(port: u16, store: &TrustStore) -> ConnectConfig {
         password: Zeroizing::new("not-a-real-password".to_string()),
         width: 1024,
         height: 768,
+        monitors: Vec::new(),
         allow_without_nla: false,
         trust_store: store.clone(),
         timeout: Duration::from_secs(5),

@@ -25,7 +25,7 @@ pub struct AddEditPcDialog {
     pub resolution: ResolutionOption,
     pub color_quality: ColorQuality,
     pub fit_to_window: bool,
-    pub use_all_monitors: bool,
+    pub screens: u8,
     pub hidpi_full_resolution: bool,
     pub audio_playback: AudioPlaybackMode,
     pub redirect_microphones: bool,
@@ -61,7 +61,7 @@ impl Default for AddEditPcDialog {
             resolution: ResolutionOption::Native,
             color_quality: ColorQuality::High32Bit,
             fit_to_window: true,
-            use_all_monitors: false,
+            screens: 1,
             hidpi_full_resolution: true,
             audio_playback: AudioPlaybackMode::LocalDevice,
             redirect_microphones: false,
@@ -109,7 +109,7 @@ impl AddEditPcDialog {
         self.resolution = bookmark.resolution;
         self.color_quality = bookmark.color_quality;
         self.fit_to_window = bookmark.fit_to_window;
-        self.use_all_monitors = bookmark.use_all_monitors;
+        self.screens = bookmark.screens.clamp(1, 4);
         self.hidpi_full_resolution = bookmark.hidpi_full_resolution;
         self.audio_playback = bookmark.audio_playback;
         self.redirect_microphones = bookmark.redirect_microphones;
@@ -209,7 +209,7 @@ impl AddEditPcDialog {
                                 bookmark.resolution = self.resolution;
                                 bookmark.color_quality = self.color_quality;
                                 bookmark.fit_to_window = self.fit_to_window;
-                                bookmark.use_all_monitors = self.use_all_monitors;
+                                bookmark.screens = self.screens;
                                 bookmark.hidpi_full_resolution = self.hidpi_full_resolution;
                                 bookmark.audio_playback = self.audio_playback;
                                 bookmark.redirect_microphones = self.redirect_microphones;
@@ -395,7 +395,22 @@ impl AddEditPcDialog {
 
         ui.add_space(8.0);
         ui.checkbox(&mut self.fit_to_window, "Fit session to window");
-        ui.checkbox(&mut self.use_all_monitors, "Use all monitors");
+        ui.horizontal(|ui| {
+            ui.label("Screens:");
+            for count in 1..=4u8 {
+                ui.selectable_value(&mut self.screens, count, count.to_string());
+            }
+        });
+        if self.screens > 1 {
+            ui.label(
+                egui::RichText::new(
+                    "Remoport opens one window per screen. Move each to its screen and press \
+                     Ctrl+Alt+Enter to make it fill that screen; the PC follows their sizes.",
+                )
+                .size(11.5)
+                .weak(),
+            );
+        }
         ui.checkbox(
             &mut self.hidpi_full_resolution,
             "Use full resolution on HiDPI displays",

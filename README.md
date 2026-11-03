@@ -13,8 +13,10 @@ side by side, and workspaces that bring in what your organization offers.
 > shared text clipboard can be turned on per PC, and a dropped connection comes back
 > to the same session; the microphone and local folders can be offered per PC too.
 > PCs behind an RD Gateway are reached through it, and accounts that may not use NTLM
-> sign in with Kerberos. This still awaits testing against real servers. Several
-> monitors come next.
+> sign in with Kerberos. A session can span several screens, one window each, and go
+> full screen (Ctrl+Alt+Enter); a Keys menu sends the combinations this computer
+> keeps for itself, such as the Windows key or Alt+Tab. This still awaits testing
+> against real servers.
 
 ## Security
 
@@ -76,8 +78,10 @@ te ofrece.
 > PC y un portapapeles de texto compartido se activan por PC, una conexión caída
 > vuelve a la misma sesión, y el micrófono y carpetas locales también se ofrecen por
 > PC, a los PCs detrás de un RD Gateway se llega a través de él, y las cuentas que no
-> pueden usar NTLM inician sesión con Kerberos; falta probarlo contra servidores
-> reales. Varios monitores vienen después.
+> pueden usar NTLM inician sesión con Kerberos. Una sesión puede usar varias
+> pantallas, una ventana cada una, y pasar a pantalla completa (Ctrl+Alt+Enter); un
+> menú Teclas envía las combinaciones que este equipo se reserva, como la tecla
+> Windows o Alt+Tab. Falta probarlo contra servidores reales.
 
 **Seguridad:** Remoport confirma la identidad del PC antes de usar tu contraseña (y te
 muestra la huella del certificado si no puede verificarlo), rechaza un RD Gateway cuyo

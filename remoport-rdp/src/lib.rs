@@ -66,6 +66,9 @@ pub struct ConnectConfig {
     pub password: Zeroizing<String>,
     pub width: u16,
     pub height: u16,
+    /// The size of each screen, left to right, when the session spans
+    /// several; `width` and `height` are then ignored. Empty for one screen.
+    pub monitors: Vec<(u16, u16)>,
     /// Lets this PC sign in on its own screen when it does not offer NLA.
     pub allow_without_nla: bool,
     /// Where the certificates the user trusted are kept.
@@ -226,6 +229,8 @@ pub enum Event {
     Clipboard(ClipboardText),
     /// The PC opened (`true`) or closed the microphone.
     Microphone(bool),
+    /// Where each screen lies on the remote desktop, as the PC reports it.
+    Monitors(Vec<Rect>),
     /// The PC issued (or renewed, hourly) the cookie that resumes this
     /// session after a dropped connection; keep the latest.
     ResumeCookie(ResumeCookie),
@@ -259,6 +264,8 @@ pub enum Command {
         width: u16,
         height: u16,
     },
+    /// The size of each screen, left to right, for a session on several.
+    Layout(Vec<(u16, u16)>),
     CtrlAltDel,
     /// The user pasted this text: the PC gets it, when the clipboard is
     /// shared with it, and then the V of Ctrl+V. Ctrl itself is sent as a key.

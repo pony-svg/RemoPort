@@ -176,6 +176,18 @@ pub struct ActiveSession {
     microphone_live: bool,
     /// The user muted the microphone; the PC then gets silence.
     microphone_muted: Arc<AtomicBool>,
+    /// Give the remote screen the keyboard back after a menu took it.
+    refocus: bool,
+    /// Windows the session spans, one per screen.
+    screens: usize,
+    /// Each window's drawing area in physical pixels, the main one first.
+    screen_px: Vec<(u16, u16)>,
+    /// Where the PC says each screen lies, left to right.
+    remote_monitors: Vec<RemoteRect>,
+    /// The screen sizes last asked for, until the PC follows them.
+    requested_layout: Option<Vec<(u16, u16)>>,
+    /// Screen sizes that changed, and since when, before they are asked for.
+    pending_layout: Option<(Vec<(u16, u16)>, Instant)>,
 }
 
 impl ActiveSession {
@@ -183,6 +195,7 @@ impl ActiveSession {
     /// user's PCs (whose password may be remembered) or a one-off.
     pub fn new(bookmark: DeviceBookmark, saved: bool) -> Self {
         let keyring = saved.then(|| credentials::lookup(bookmark.id));
+        let screens = usize::from(bookmark.screens.clamp(1, 4));
         Self {
             username: bookmark.username.clone(),
             bookmark,
@@ -212,6 +225,12 @@ impl ActiveSession {
             resume: None,
             microphone_live: false,
             microphone_muted: Arc::new(AtomicBool::new(false)),
+            refocus: false,
+            screens,
+            screen_px: vec![(1280, 720); screens],
+            remote_monitors: Vec::new(),
+            requested_layout: None,
+            pending_layout: None,
         }
     }
 
@@ -219,12 +238,17 @@ impl ActiveSession {
         self.poll_keyring();
         self.poll_engine();
 
-        egui::Frame::none()
-            .inner_margin(egui::Margin::symmetric(12.0, 6.0))
-            .show(ui, |ui| self.top_bar(ui, on_disconnect));
-        ui.separator();
-        if let Some(ref msg) = self.notification_msg {
-            ui.colored_label(theme.accent, format!("ℹ {msg}"));
+        // In full screen the PC gets the whole screen; Ctrl+Alt+Enter brings
+        // the bar back.
+        let fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
+        if !(fullscreen && matches!(self.phase, Phase::Connected)) {
+            egui::Frame::none()
+                .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+                .show(ui, |ui| self.top_bar(ui, on_disconnect));
+            ui.separator();
+            if let Some(ref msg) = self.notification_msg {
+                ui.colored_label(theme.accent, format!("ℹ {msg}"));
+            }
         }
 
         if let Some(app) = self.open_app.clone() {
@@ -258,7 +282,7 @@ impl ActiveSession {
                 );
             }
             Phase::VerifyIdentity { .. } => self.identity_question(ui, theme),
-            Phase::Connected => self.remote_screen(ui),
+            Phase::Connected => self.remote_screens(ui),
             Phase::Reconnecting { attempt, .. } => self.reconnecting(ui, attempt),
             Phase::Ended(ref reason) => {
                 let reason = reason.clone();
@@ -330,9 +354,40 @@ impl ActiveSession {
                         });
                     }
                 }
-                if connected && ui.button("⌨ Ctrl+Alt+Del").clicked() {
-                    logging::event("Sent Ctrl+Alt+Del");
-                    self.send(Command::CtrlAltDel);
+                if connected
+                    && ui
+                        .button("⛶ Full screen")
+                        .on_hover_text("Ctrl+Alt+Enter switches full screen on and off")
+                        .clicked()
+                {
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+                    self.refocus = true;
+                }
+                if connected {
+                    ui.menu_button("⌨ Keys", |ui| {
+                        if ui.button("Ctrl+Alt+Del").clicked() {
+                            logging::event("Sent Ctrl+Alt+Del");
+                            self.send(Command::CtrlAltDel);
+                            self.refocus = true;
+                            ui.close_menu();
+                        }
+                        for (label, keys) in keymap::COMBINATIONS {
+                            if ui.button(*label).clicked() {
+                                logging::event(format_args!("Sent {label}"));
+                                for (key, pressed) in keymap::strokes(keys) {
+                                    self.send_key(key, pressed);
+                                }
+                                self.refocus = true;
+                                ui.close_menu();
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "Key combinations this computer keeps for itself, \
+                         or that cannot be typed here",
+                    );
                 }
             });
         });
@@ -354,7 +409,12 @@ impl ActiveSession {
                     .as_ref()
                     .map(|g| format!(" · {g}"))
                     .unwrap_or_default();
-                format!("Connected{size}{graphics}")
+                let screens = if self.screens > 1 {
+                    format!(" · {} screens", self.screens)
+                } else {
+                    String::new()
+                };
+                format!("Connected{size}{screens}{graphics}")
             }
             Phase::Reconnecting { attempt, .. } => {
                 format!("Reconnecting… ({attempt} of {MAX_RECONNECTS})")
@@ -521,6 +581,17 @@ impl ActiveSession {
         let (domain, user) = split_domain(&username);
         let (width, height) = desktop_size(self.canvas_px);
         let password = self.session_password.clone().unwrap_or_default();
+        if let Some(first) = self.screen_px.first_mut() {
+            *first = self.canvas_px;
+        }
+        let monitors: Vec<(u16, u16)> = if self.screens > 1 {
+            self.screen_px.iter().map(|&px| desktop_size(px)).collect()
+        } else {
+            Vec::new()
+        };
+        if !monitors.is_empty() {
+            logging::event(format_args!("On {} screens: {monitors:?}", monitors.len()));
+        }
 
         let sound = (self.bookmark.audio_playback == AudioPlaybackMode::LocalDevice)
             .then(|| Box::new(crate::audio::Speaker::new()) as Box<dyn SoundOutput>);
@@ -596,6 +667,7 @@ impl ActiveSession {
             password,
             width,
             height,
+            monitors,
             allow_without_nla: self.bookmark.allow_without_nla,
             trust_store,
             timeout,
@@ -703,6 +775,18 @@ impl ActiveSession {
             EngineEvent::PointerHidden(hidden) => self.remote_cursor_hidden = hidden,
             EngineEvent::Clipboard(text) => self.remote_copy = Some(text),
             EngineEvent::Microphone(live) => self.microphone_live = live,
+            EngineEvent::Monitors(mut monitors) => {
+                monitors.sort_by_key(|m| (m.x, m.y));
+                logging::event(format_args!(
+                    "The PC's screens: {}",
+                    monitors
+                        .iter()
+                        .map(|m| format!("{}×{} at {},{}", m.width, m.height, m.x, m.y))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                self.remote_monitors = monitors;
+            }
             EngineEvent::ResumeCookie(cookie) => {
                 logging::event("The PC gave a cookie to resume this session after a drop");
                 self.resume = Some(cookie);
@@ -806,6 +890,9 @@ impl ActiveSession {
         self.modifiers = Modifiers::NONE;
         self.remote_copy = None;
         self.microphone_live = false;
+        self.remote_monitors.clear();
+        self.requested_layout = None;
+        self.pending_layout = None;
     }
 
     fn send(&self, command: Command) {
@@ -966,33 +1053,106 @@ impl ActiveSession {
         self.canvas_px = (to_u16(px.x), to_u16(px.y));
     }
 
-    fn remote_screen(&mut self, ui: &mut Ui) {
-        self.measure_canvas(ui);
-        self.follow_canvas();
+    /// The remote desktop: the main window shows the first screen, and each
+    /// further screen gets a window of its own.
+    fn remote_screens(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let mut focus = self.remote_screen(ui, 0);
+        for index in 1..self.screens {
+            let title = format!("{} · screen {}", self.bookmark.display_title(), index + 1);
+            let builder = egui::ViewportBuilder::default()
+                .with_title(title)
+                .with_inner_size([960.0, 600.0]);
+            let id = egui::ViewportId::from_hash_of(("remoport-screen", index));
+            ctx.show_viewport_immediate(id, builder, |ctx, _| {
+                // The session ends from the main window; a screen's stays.
+                if ctx.input(|i| i.viewport().close_requested()) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                }
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none().fill(Color32::BLACK))
+                    .show(ctx, |ui| {
+                        if let Some(found) = self.remote_screen(ui, index) {
+                            focus = Some(found);
+                        }
+                    });
+            });
+        }
+        self.sync_modifiers(focus.map_or(Modifiers::NONE, |(modifiers, _)| modifiers));
+        if let Some(text) = self.remote_copy.take() {
+            // Only while the user works in the session: a PC copying on its
+            // own does not get to replace this computer's clipboard.
+            if focus.is_some_and(|(_, window_focused)| window_focused) {
+                logging::event(format_args!(
+                    "Copied from the PC: {} characters",
+                    text.as_str().chars().count()
+                ));
+                ctx.output_mut(|o| o.copied_text = text.as_str().to_string());
+            } else {
+                logging::event("The PC's clipboard was not taken: the session was not in use");
+            }
+        }
+        if self.screens > 1 {
+            self.follow_layout();
+        } else {
+            self.follow_canvas();
+        }
+    }
+
+    /// One window's part of the remote desktop, with its input. Returns the
+    /// modifiers held and whether the window has the system's focus, when
+    /// this window has the keyboard.
+    fn remote_screen(&mut self, ui: &mut Ui, index: usize) -> Option<(Modifiers, bool)> {
+        let px = ui.available_size() * ui.ctx().pixels_per_point();
+        let px = (to_u16(px.x), to_u16(px.y));
+        if index == 0 {
+            self.canvas_px = px;
+        }
+        if let Some(slot) = self.screen_px.get_mut(index) {
+            *slot = px;
+        }
 
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         ui.painter()
             .rect_filled(rect, Rounding::ZERO, Color32::BLACK);
-        let Some(screen) = &mut self.screen else {
-            return;
-        };
-        let (width, height) = (screen.width as f32, screen.height as f32);
+        let region = self.region(index)?;
+        let screen = self.screen.as_mut()?;
+        let (desktop_width, desktop_height) = (screen.width as f32, screen.height as f32);
+        let (width, height) = (f32::from(region.width), f32::from(region.height));
         let size = vec2(width, height) / ppp;
         // Never enlarge: until the server follows a resize, the picture is
         // shown at its own size or smaller, centered.
         let scale = (rect.width() / size.x).min(rect.height() / size.y).min(1.0);
         let image = Rect::from_center_size(rect.center(), size * scale);
         let texture = screen.texture(&ctx).id();
-        ui.painter().image(
-            texture,
-            image,
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
+        let uv = Rect::from_min_max(
+            pos2(
+                f32::from(region.x) / desktop_width,
+                f32::from(region.y) / desktop_height,
+            ),
+            pos2(
+                (f32::from(region.x) + width) / desktop_width,
+                (f32::from(region.y) + height) / desktop_height,
+            ),
         );
+        ui.painter().image(texture, image, uv, Color32::WHITE);
 
-        if response.clicked() || response.drag_started() {
+        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        if index > 0 && !fullscreen {
+            ui.painter().text(
+                rect.center_top() + vec2(0.0, 12.0),
+                Align2::CENTER_TOP,
+                "Move this window to its screen, then press Ctrl+Alt+Enter",
+                FontId::proportional(13.0),
+                Color32::from_white_alpha(210),
+            );
+        }
+        if response.clicked()
+            || response.drag_started()
+            || (index == 0 && std::mem::take(&mut self.refocus))
+        {
             response.request_focus();
         }
         let focused = response.has_focus();
@@ -1020,19 +1180,6 @@ impl ActiveSession {
         if response.hovered() && self.remote_cursor_hidden {
             ctx.set_cursor_icon(egui::CursorIcon::None);
         }
-        if let Some(text) = self.remote_copy.take() {
-            // Only while the user works in the session: a PC copying on its
-            // own does not get to replace this computer's clipboard.
-            if focused && ctx.input(|i| i.focused) {
-                logging::event(format_args!(
-                    "Copied from the PC: {} characters",
-                    text.as_str().chars().count()
-                ));
-                ctx.output_mut(|o| o.copied_text = text.as_str().to_string());
-            } else {
-                logging::event("The PC's clipboard was not taken: the session was not in use");
-            }
-        }
 
         let to_remote = |pos: egui::Pos2| -> Option<(u16, u16)> {
             if !image.contains(pos) {
@@ -1040,7 +1187,10 @@ impl ActiveSession {
             }
             let x = (pos.x - image.min.x) / image.width() * width;
             let y = (pos.y - image.min.y) / image.height() * height;
-            Some((to_u16(x.min(width - 1.0)), to_u16(y.min(height - 1.0))))
+            Some((
+                region.x.saturating_add(to_u16(x.min(width - 1.0))),
+                region.y.saturating_add(to_u16(y.min(height - 1.0))),
+            ))
         };
 
         let (events, modifiers) = ui.input(|i| (i.events.clone(), i.modifiers));
@@ -1084,6 +1234,22 @@ impl ActiveSession {
                         });
                     }
                 }
+                // Ctrl+Alt+Enter is Remoport's: full screen on and off.
+                Event::Key {
+                    key: egui::Key::Enter,
+                    pressed,
+                    modifiers,
+                    ..
+                } if focused && modifiers.ctrl && modifiers.alt => {
+                    if pressed {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
+                        logging::event(if fullscreen {
+                            "Left full screen"
+                        } else {
+                            "Full screen"
+                        });
+                    }
+                }
                 Event::Key {
                     key,
                     physical_key,
@@ -1108,7 +1274,21 @@ impl ActiveSession {
                 _ => {}
             }
         }
-        self.sync_modifiers(if focused { modifiers } else { Modifiers::NONE });
+        focused.then(|| (modifiers, ctx.input(|i| i.focused)))
+    }
+
+    /// The part of the remote desktop window `index` shows.
+    fn region(&self, index: usize) -> Option<RemoteRect> {
+        let screen = self.screen.as_ref()?;
+        let width = u16::try_from(screen.width).unwrap_or(u16::MAX);
+        let height = u16::try_from(screen.height).unwrap_or(u16::MAX);
+        Some(screen_region(
+            (width, height),
+            &self.remote_monitors,
+            self.requested_layout.as_deref(),
+            self.screens,
+            index,
+        ))
     }
 
     /// Presses or releases Shift, Ctrl and Alt on the remote side to match.
@@ -1153,6 +1333,35 @@ impl ActiveSession {
                 }
             }
             _ => self.pending_size = Some((target, Instant::now())),
+        }
+    }
+
+    /// Asks the PC for the screens' sizes once the windows have settled.
+    fn follow_layout(&mut self) {
+        if !self.display_control || self.screen.is_none() {
+            return;
+        }
+        let target: Vec<(u16, u16)> = self.screen_px.iter().map(|&px| desktop_size(px)).collect();
+        let close_enough = self.remote_monitors.len() == target.len()
+            && self
+                .remote_monitors
+                .iter()
+                .zip(&target)
+                .all(|(m, &(w, h))| m.width.abs_diff(w) <= 8 && m.height.abs_diff(h) <= 8);
+        if close_enough || self.requested_layout.as_ref() == Some(&target) {
+            self.pending_layout = None;
+            return;
+        }
+        match &self.pending_layout {
+            Some((sizes, since)) if *sizes == target => {
+                if since.elapsed() >= RESIZE_SETTLE {
+                    logging::event(format_args!("Asked the PC for screens {target:?}"));
+                    self.send(Command::Layout(target.clone()));
+                    self.requested_layout = Some(target);
+                    self.pending_layout = None;
+                }
+            }
+            _ => self.pending_layout = Some((target, Instant::now())),
         }
     }
 
@@ -1300,6 +1509,61 @@ fn desktop_size((width, height): (u16, u16)) -> (u16, u16) {
     )
 }
 
+/// Window `index`'s part of a desktop of `size`: where the PC says that
+/// screen lies when it said so for every screen; else the sizes asked for,
+/// side by side, once the desktop has taken them; else equal slices.
+fn screen_region(
+    size: (u16, u16),
+    reported: &[RemoteRect],
+    asked: Option<&[(u16, u16)]>,
+    screens: usize,
+    index: usize,
+) -> RemoteRect {
+    let (width, height) = size;
+    let whole = RemoteRect {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    };
+    if screens <= 1 {
+        return whole;
+    }
+    let fits = |r: &RemoteRect| {
+        u32::from(r.x) + u32::from(r.width) <= u32::from(width)
+            && u32::from(r.y) + u32::from(r.height) <= u32::from(height)
+    };
+    if reported.len() == screens && reported.iter().all(fits) {
+        return reported[index];
+    }
+    if let Some(asked) = asked.filter(|asked| asked.len() == screens) {
+        let total: u32 = asked.iter().map(|&(w, _)| u32::from(w)).sum();
+        if total == u32::from(width) {
+            let x: u32 = asked[..index].iter().map(|&(w, _)| u32::from(w)).sum();
+            let (w, h) = asked[index];
+            return RemoteRect {
+                x: u16::try_from(x).unwrap_or(u16::MAX),
+                y: 0,
+                width: w,
+                height: h.min(height),
+            };
+        }
+    }
+    let count = u16::try_from(screens).unwrap_or(1);
+    let slice = width / count;
+    let x = slice * u16::try_from(index).unwrap_or(0);
+    RemoteRect {
+        x,
+        y: 0,
+        width: if index + 1 == screens {
+            width - x
+        } else {
+            slice
+        },
+        height,
+    }
+}
+
 fn remote_button(button: PointerButton) -> MouseButton {
     match button {
         PointerButton::Primary => MouseButton::Left,
@@ -1342,6 +1606,44 @@ mod tests {
         assert_eq!(split_domain("jdoe@shd.gov.co"), (None, "jdoe@shd.gov.co"));
         assert_eq!(split_domain("jdoe"), (None, "jdoe"));
         assert_eq!(split_domain("\\jdoe"), (None, "\\jdoe"));
+    }
+
+    #[test]
+    fn each_window_shows_its_own_screen() {
+        let rect = |x, width, height| RemoteRect {
+            x,
+            y: 0,
+            width,
+            height,
+        };
+        // One screen: the whole desktop.
+        assert_eq!(
+            screen_region((1280, 720), &[], None, 1, 0),
+            rect(0, 1280, 720)
+        );
+        // As the PC reports them.
+        let reported = [rect(0, 1920, 1080), rect(1920, 1280, 1024)];
+        assert_eq!(
+            screen_region((3200, 1080), &reported, None, 2, 1),
+            rect(1920, 1280, 1024)
+        );
+        // A report that no longer fits the desktop is not trusted.
+        let asked = [(1600, 900), (1600, 900)];
+        assert_eq!(
+            screen_region(
+                (3200, 900),
+                &[rect(0, 1920, 1080), rect(1920, 1920, 1080)],
+                Some(&asked),
+                2,
+                1
+            ),
+            rect(1600, 1600, 900)
+        );
+        // Before the desktop takes the sizes asked for: equal slices.
+        assert_eq!(
+            screen_region((1281, 720), &[], Some(&asked), 2, 1),
+            rect(640, 641, 720)
+        );
     }
 
     #[test]

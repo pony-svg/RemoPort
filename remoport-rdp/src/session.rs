@@ -9,6 +9,7 @@ use std::time::Duration;
 use ironrdp_connector::connection_activation::{
     ConnectionActivationFactory, ConnectionActivationState,
 };
+use ironrdp_displaycontrol::pdu::{DisplayControlMonitorLayout, MonitorLayoutEntry};
 use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_input::{Database, MousePosition, Operation, Scancode, WheelRotations};
 use ironrdp_pdu::WriteBuf;
@@ -224,6 +225,9 @@ where
             reactivate(activation, reader, writer, image, stage, events).await;
         }
         ActiveStageOutput::ServerRedirection(_) => return Err(Error::BrokerRedirect),
+        ActiveStageOutput::MonitorLayout(monitors) => {
+            let _ = events.send(Event::Monitors(monitor_rects(&monitors)));
+        }
         ActiveStageOutput::AutoReconnectCookie(cookie) => {
             let _ = events.send(Event::ResumeCookie(ResumeCookie::new(
                 cookie.logon_id,
@@ -356,6 +360,23 @@ async fn apply_command(
                 Operation::KeyReleased(ctrl),
             ]
         }
+        Command::Layout(sizes) => {
+            let frame = monitor_layout(&sizes)
+                .map_err(|e| e.to_string())
+                .and_then(|layout| match stage.encode_monitor_layout(&layout) {
+                    Some(result) => result.map_err(|e| e.to_string()),
+                    None => Err("the PC cannot change its screens during the session".to_string()),
+                });
+            match frame {
+                Ok(frame) => {
+                    let _ = writer.write_all(&frame).await;
+                }
+                Err(e) => {
+                    let _ = events.send(Event::Progress(format!("Screen layout not sent: {e}")));
+                }
+            }
+            return;
+        }
         Command::Resize { width, height } => {
             match stage.encode_resize(u32::from(width), u32::from(height), None, None) {
                 Some(Ok(frame)) => {
@@ -411,6 +432,43 @@ async fn send_input(
             }
         }
     }
+}
+
+/// A Display Control layout for screens side by side, left to right, the
+/// first one primary.
+fn monitor_layout(
+    sizes: &[(u16, u16)],
+) -> Result<DisplayControlMonitorLayout, ironrdp_core::EncodeError> {
+    let mut left = 0i32;
+    let mut entries = Vec::with_capacity(sizes.len());
+    for (index, &(width, height)) in sizes.iter().enumerate() {
+        let (width, height) =
+            MonitorLayoutEntry::adjust_display_size(u32::from(width), u32::from(height));
+        let entry = if index == 0 {
+            MonitorLayoutEntry::new_primary(width, height)?
+        } else {
+            MonitorLayoutEntry::new_secondary(width, height)?.with_position(left, 0)?
+        };
+        entries.push(entry);
+        left += i32::try_from(width).unwrap_or(i32::MAX);
+    }
+    DisplayControlMonitorLayout::new(&entries)
+}
+
+/// The PC's screens as rectangles from the desktop's top-left corner.
+fn monitor_rects(monitors: &[ironrdp_pdu::gcc::Monitor]) -> Vec<Rect> {
+    let left = monitors.iter().map(|m| m.left).min().unwrap_or(0);
+    let top = monitors.iter().map(|m| m.top).min().unwrap_or(0);
+    let clamp = |value: i32| u16::try_from(value.max(0)).unwrap_or(u16::MAX);
+    monitors
+        .iter()
+        .map(|m| Rect {
+            x: clamp(m.left - left),
+            y: clamp(m.top - top),
+            width: clamp(m.right - m.left + 1),
+            height: clamp(m.bottom - m.top + 1),
+        })
+        .collect()
 }
 
 /// An IronRDP damage region includes its right column and bottom row.
@@ -504,6 +562,50 @@ mod tests {
         };
         assert_eq!(region_data(&image, rect).len(), 2 * 2 * 4);
         let _ = &mut image;
+    }
+
+    #[test]
+    fn screens_are_laid_out_left_to_right() {
+        let layout = monitor_layout(&[(1920, 1080), (1280, 1024)]).expect("layout");
+        let encoded = format!("{layout:?}");
+        assert!(
+            encoded.contains("1920") && encoded.contains("1280"),
+            "{encoded}"
+        );
+        let rects = monitor_rects(&[
+            ironrdp_pdu::gcc::Monitor {
+                left: -1280,
+                top: 0,
+                right: -1,
+                bottom: 1023,
+                flags: ironrdp_pdu::gcc::MonitorFlags::empty(),
+            },
+            ironrdp_pdu::gcc::Monitor {
+                left: 0,
+                top: 0,
+                right: 1919,
+                bottom: 1079,
+                flags: ironrdp_pdu::gcc::MonitorFlags::PRIMARY,
+            },
+        ]);
+        assert_eq!(
+            rects[0],
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 1024
+            }
+        );
+        assert_eq!(
+            rects[1],
+            Rect {
+                x: 1280,
+                y: 0,
+                width: 1920,
+                height: 1080
+            }
+        );
     }
 
     #[test]

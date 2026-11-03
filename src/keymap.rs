@@ -16,6 +16,36 @@ pub const ALT: Scancode = (0x38, false);
 pub const C: Scancode = (0x2E, false);
 pub const X: Scancode = (0x2D, false);
 pub const V: Scancode = (0x2F, false);
+/// Keys egui on Linux never reports, sent from the session's Keys menu.
+pub const WINDOWS: Scancode = (0x5B, true);
+pub const ESCAPE: Scancode = (0x01, false);
+pub const TAB: Scancode = (0x0F, false);
+pub const F4: Scancode = (0x3E, false);
+pub const PRINT_SCREEN: Scancode = (0x37, true);
+pub const R: Scancode = (0x13, false);
+pub const E: Scancode = (0x12, false);
+pub const D: Scancode = (0x20, false);
+
+/// Key combinations for the PC that this computer would keep for itself
+/// (Alt+Tab, Alt+F4) or that egui does not report (the Windows key).
+pub const COMBINATIONS: &[(&str, &[Scancode])] = &[
+    ("Windows key (Start)", &[WINDOWS]),
+    ("Win+R · Run", &[WINDOWS, R]),
+    ("Win+E · File Explorer", &[WINDOWS, E]),
+    ("Win+D · Show desktop", &[WINDOWS, D]),
+    ("Alt+Tab · Switch apps", &[ALT, TAB]),
+    ("Ctrl+Shift+Esc · Task Manager", &[CTRL, SHIFT, ESCAPE]),
+    ("Alt+F4 · Close the window", &[ALT, F4]),
+    ("Print Screen", &[PRINT_SCREEN]),
+];
+
+/// A combination as key presses in order, then releases in reverse.
+pub fn strokes(keys: &[Scancode]) -> Vec<(Scancode, bool)> {
+    keys.iter()
+        .map(|&key| (key, true))
+        .chain(keys.iter().rev().map(|&key| (key, false)))
+        .collect()
+}
 
 /// The scancode of the key at `key`'s position on a US keyboard, if it has one.
 pub fn scancode(key: Key) -> Option<Scancode> {
@@ -150,5 +180,21 @@ mod tests {
         assert_eq!(scancode(Key::C), Some(C));
         assert_eq!(scancode(Key::X), Some(X));
         assert_eq!(scancode(Key::V), Some(V));
+    }
+
+    #[test]
+    fn combinations_press_in_order_and_release_in_reverse() {
+        assert_eq!(
+            strokes(&[CTRL, SHIFT, ESCAPE]),
+            vec![
+                (CTRL, true),
+                (SHIFT, true),
+                (ESCAPE, true),
+                (ESCAPE, false),
+                (SHIFT, false),
+                (CTRL, false),
+            ]
+        );
+        assert!(COMBINATIONS.iter().all(|(_, keys)| !keys.is_empty()));
     }
 }

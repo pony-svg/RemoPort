@@ -83,7 +83,9 @@ pub struct DeviceBookmark {
     pub resolution: ResolutionOption,
     pub color_quality: ColorQuality,
     pub fit_to_window: bool,
-    pub use_all_monitors: bool,
+    /// How many of this computer's screens the session uses, one window each.
+    #[serde(default = "one_screen")]
+    pub screens: u8,
     pub hidpi_full_resolution: bool,
     pub audio_playback: AudioPlaybackMode,
     pub redirect_microphones: bool,
@@ -114,6 +116,10 @@ pub struct DeviceBookmark {
     pub kdc: String,
 }
 
+fn one_screen() -> u8 {
+    1
+}
+
 impl DeviceBookmark {
     pub fn new(pc_name: String, friendly_name: String, group_name: String) -> Self {
         Self {
@@ -129,7 +135,7 @@ impl DeviceBookmark {
             resolution: ResolutionOption::Native,
             color_quality: ColorQuality::High32Bit,
             fit_to_window: true,
-            use_all_monitors: false,
+            screens: 1,
             hidpi_full_resolution: true,
             audio_playback: AudioPlaybackMode::LocalDevice,
             redirect_microphones: false,

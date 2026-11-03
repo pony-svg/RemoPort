@@ -259,7 +259,10 @@ async fn an_untrusted_gateway_never_gets_the_credentials() {
     let (dir, store) = scratch_store("gateway");
     let mut settings = config(3389, &store);
     settings.host = "pc.internal.example".to_string();
-    settings.gateway = Some(format!("localhost:{port}"));
+    settings.gateway = Some(remoport_rdp::Gateway {
+        address: format!("localhost:{port}"),
+        account: None,
+    });
     let session = Session::start(settings);
     match next_event(&session).await {
         Event::Ended(Some(Error::Gateway(why))) => assert!(why.contains("not trusted"), "{why}"),

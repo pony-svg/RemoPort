@@ -37,6 +37,7 @@ pub struct AddEditPcDialog {
     pub redirected_folders: Vec<RedirectedFolder>,
     pub allow_without_nla: bool,
     pub gateway: String,
+    pub gateway_username: String,
     pub kerberos: bool,
     pub kdc: String,
     pub new_folder_path: String,
@@ -73,6 +74,7 @@ impl Default for AddEditPcDialog {
             redirected_folders: Vec::new(),
             allow_without_nla: false,
             gateway: String::new(),
+            gateway_username: String::new(),
             kerberos: false,
             kdc: String::new(),
             new_folder_path: "".to_string(),
@@ -121,6 +123,7 @@ impl AddEditPcDialog {
         self.redirected_folders = bookmark.redirected_folders.clone();
         self.allow_without_nla = bookmark.allow_without_nla;
         self.gateway = bookmark.gateway.clone();
+        self.gateway_username = bookmark.gateway_username.clone();
         self.kerberos = bookmark.kerberos;
         self.kdc = bookmark.kdc.clone();
         self.original = Some(bookmark.clone());
@@ -221,6 +224,8 @@ impl AddEditPcDialog {
                                 bookmark.redirected_folders = self.redirected_folders.clone();
                                 bookmark.allow_without_nla = self.allow_without_nla;
                                 bookmark.gateway = self.gateway.trim().to_string();
+                                bookmark.gateway_username =
+                                    self.gateway_username.trim().to_string();
                                 bookmark.kerberos = self.kerberos;
                                 bookmark.kdc = self.kdc.trim().to_string();
 
@@ -296,12 +301,22 @@ impl AddEditPcDialog {
                         .desired_width(320.0),
                 );
                 ui.end_row();
+
+                if !self.gateway.trim().is_empty() {
+                    ui.label("Gateway account:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.gateway_username)
+                            .hint_text("Leave empty to use the PC's account")
+                            .desired_width(320.0),
+                    );
+                    ui.end_row();
+                }
             });
         if !self.gateway.trim().is_empty() {
             ui.label(
                 egui::RichText::new(
-                    "Signs in to the gateway with this PC's account. Its certificate must come \
-                     from an authority this computer trusts.",
+                    "The gateway's certificate must come from an authority this computer \
+                     trusts. With an account of its own, its password is asked when connecting.",
                 )
                 .size(11.5)
                 .weak(),

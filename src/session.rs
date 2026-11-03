@@ -172,6 +172,10 @@ pub struct ActiveSession {
     session_password: Option<Zeroizing<String>>,
     /// The PC's latest cookie for resuming this session.
     resume: Option<ResumeCookie>,
+    /// The gateway's own password, as typed.
+    gateway_password: Zeroizing<String>,
+    /// That password, kept like `session_password` while the session lasts.
+    session_gateway_password: Option<Zeroizing<String>>,
     /// The PC has the microphone open.
     microphone_live: bool,
     /// The user muted the microphone; the PC then gets silence.
@@ -223,6 +227,8 @@ impl ActiveSession {
             remote_copy: None,
             session_password: None,
             resume: None,
+            gateway_password: Zeroizing::new(String::new()),
+            session_gateway_password: None,
             microphone_live: false,
             microphone_muted: Arc::new(AtomicBool::new(false)),
             refocus: false,
@@ -518,6 +524,18 @@ impl ActiveSession {
                             ui.checkbox(&mut self.remember, "Remember in the system keyring");
                             ui.end_row();
                         }
+                        if self.gateway_account().is_some() {
+                            ui.label("Gateway password");
+                            let field = ui.add(
+                                egui::TextEdit::singleline(&mut *self.gateway_password)
+                                    .password(true)
+                                    .hint_text(self.bookmark.gateway_username.trim().to_string())
+                                    .desired_width(280.0),
+                            );
+                            submit |=
+                                field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            ui.end_row();
+                        }
                     });
             });
             if forget {
@@ -554,9 +572,13 @@ impl ActiveSession {
         };
         self.to_remember = (self.saved && self.remember && !self.password.is_empty())
             .then(|| self.password.clone());
-        // Kept, wiped on drop, for reconnecting; the form's copy goes now.
+        // Kept, wiped on drop, for reconnecting; the form's copies go now.
         self.session_password = Some(password);
         self.password.zeroize();
+        self.session_gateway_password = self
+            .gateway_account()
+            .map(|_| self.gateway_password.clone());
+        self.gateway_password.zeroize();
         self.resume = None;
         self.sign_in_error = None;
         if self.start(STEP_TIMEOUT) {
@@ -676,7 +698,17 @@ impl ActiveSession {
             sound,
             microphone,
             folders,
-            gateway: Some(self.bookmark.gateway.trim().to_string()).filter(|g| !g.is_empty()),
+            gateway: Some(self.bookmark.gateway.trim().to_string())
+                .filter(|g| !g.is_empty())
+                .map(|address| remoport_rdp::Gateway {
+                    address,
+                    account: self.gateway_account().map(|user| {
+                        (
+                            user.to_string(),
+                            self.session_gateway_password.clone().unwrap_or_default(),
+                        )
+                    }),
+                }),
             kerberos: self.bookmark.kerberos.then(|| remoport_rdp::Kerberos {
                 kdc: Some(self.bookmark.kdc.trim().to_string()).filter(|k| !k.is_empty()),
             }),
@@ -688,7 +720,15 @@ impl ActiveSession {
     /// Wipes what the session kept for reconnecting.
     fn forget_session(&mut self) {
         self.session_password = None;
+        self.session_gateway_password = None;
         self.resume = None;
+    }
+
+    /// The gateway's own account, when this PC goes through a gateway that
+    /// has one.
+    fn gateway_account(&self) -> Option<&str> {
+        let user = self.bookmark.gateway_username.trim();
+        (!self.bookmark.gateway.trim().is_empty() && !user.is_empty()).then_some(user)
     }
 
     // ── Engine events ───────────────────────────────────────────────────

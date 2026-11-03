@@ -68,16 +68,24 @@ pub(crate) async fn connect(
     };
 
     // 1. Reach the PC, directly or through its RD Gateway.
-    let (stream, client_addr): (Box<dyn Transport>, _) = match config.gateway.as_deref() {
+    let (stream, client_addr): (Box<dyn Transport>, _) = match &config.gateway {
         Some(gateway) => {
-            progress(format!("Opening a tunnel through the RD Gateway {gateway}"));
+            progress(format!(
+                "Opening a tunnel through the RD Gateway {}{}",
+                gateway.address,
+                if gateway.account.is_some() {
+                    ", with its own account"
+                } else {
+                    ""
+                }
+            ));
             let (tunnel, client_addr) =
                 timeout(config.timeout, crate::gateway::open(gateway, config))
                     .await
                     .map_err(|_| Error::Timeout("reaching the RD Gateway"))??;
             progress(format!(
-                "Reached {} through {gateway} (its certificate verified)",
-                config.host
+                "Reached {} through {} (its certificate verified)",
+                config.host, gateway.address
             ));
             (Box::new(tunnel), client_addr)
         }

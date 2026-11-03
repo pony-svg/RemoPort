@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use ironrdp_mstsgu::{GwClient, GwConnectTarget, GwErrorKind};
 use ironrdp_tls::CertificateValidation;
 
-use crate::{ConnectConfig, Error};
+use crate::{ConnectConfig, Error, Gateway};
 
 /// The gateway's target, whose password copy is wiped however the
 /// connection ends.
@@ -25,19 +25,17 @@ impl Drop for Target {
 }
 
 /// Opens a tunnel through `gateway` to the PC in `config`, signing in to the
-/// gateway with the PC's credentials.
+/// gateway with its own account or else the PC's.
 pub(crate) async fn open(
-    gateway: &str,
+    gateway: &Gateway,
     config: &ConnectConfig,
 ) -> Result<(GwClient, SocketAddr), Error> {
+    let (user, password) = account(gateway, config);
     let target = Target(GwConnectTarget {
-        gw_endpoint: endpoint(gateway),
-        gw_user: match &config.domain {
-            Some(domain) if !domain.is_empty() => format!("{domain}\\{}", config.username),
-            _ => config.username.clone(),
-        },
+        gw_endpoint: endpoint(&gateway.address),
+        gw_user: user,
         // IronRDP needs an owned String; `Target` wipes it.
-        gw_pass: config.password.as_str().to_owned(),
+        gw_pass: password.to_owned(),
         smart_card: None,
         server: config.host.clone(),
     });
@@ -49,7 +47,21 @@ pub(crate) async fn open(
         None,
     )
     .await
-    .map_err(|e| failure(gateway, e.kind(), &e.report().to_string()))
+    .map_err(|e| failure(&gateway.address, e.kind(), &e.report().to_string()))
+}
+
+/// Who signs in to the gateway: its own account, else the PC's.
+fn account<'a>(gateway: &'a Gateway, config: &'a ConnectConfig) -> (String, &'a str) {
+    match &gateway.account {
+        Some((user, password)) => (user.trim().to_string(), password.as_str()),
+        None => (
+            match &config.domain {
+                Some(domain) if !domain.is_empty() => format!("{domain}\\{}", config.username),
+                _ => config.username.clone(),
+            },
+            config.password.as_str(),
+        ),
+    }
 }
 
 /// The gateway's address as IronRDP takes it: host and optional port, with
@@ -104,6 +116,50 @@ mod tests {
             failure("gw", &GwErrorKind::Connect, "connection refused"),
             Error::Unreachable(_)
         ));
+    }
+
+    #[test]
+    fn the_gateway_signs_in_with_its_own_account_or_the_pcs() {
+        let config = ConnectConfig {
+            host: "pc".to_string(),
+            port: 3389,
+            username: "ana".to_string(),
+            domain: Some("CORP".to_string()),
+            password: zeroize::Zeroizing::new("pc-secret".to_string()),
+            width: 1280,
+            height: 720,
+            monitors: Vec::new(),
+            allow_without_nla: false,
+            trust_store: crate::TrustStore::new(std::env::temp_dir().join("unused.json")),
+            timeout: std::time::Duration::from_secs(1),
+            client_name: "test".to_string(),
+            clipboard: false,
+            sound: None,
+            microphone: None,
+            folders: Vec::new(),
+            gateway: None,
+            kerberos: None,
+            resume: None,
+        };
+        let shared = Gateway {
+            address: "gw".to_string(),
+            account: None,
+        };
+        assert_eq!(
+            account(&shared, &config),
+            ("CORP\\ana".to_string(), "pc-secret")
+        );
+        let own = Gateway {
+            address: "gw".to_string(),
+            account: Some((
+                " gwuser@corp.example ".to_string(),
+                zeroize::Zeroizing::new("gw-secret".to_string()),
+            )),
+        };
+        assert_eq!(
+            account(&own, &config),
+            ("gwuser@corp.example".to_string(), "gw-secret")
+        );
     }
 
     #[test]

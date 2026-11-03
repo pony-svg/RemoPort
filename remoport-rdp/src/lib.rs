@@ -85,9 +85,8 @@ pub struct ConnectConfig {
     pub microphone: Option<Box<dyn SoundInput>>,
     /// Local folders this PC sees as drives.
     pub folders: Vec<SharedFolder>,
-    /// The RD Gateway to reach this PC through, as `host` or `host:port`;
-    /// it signs in with the PC's credentials.
-    pub gateway: Option<String>,
+    /// The RD Gateway to reach this PC through.
+    pub gateway: Option<Gateway>,
     /// Signs in with Kerberos rather than NTLM.
     pub kerberos: Option<Kerberos>,
     /// Resumes the session this cookie came from, after a dropped connection.
@@ -121,6 +120,16 @@ impl std::fmt::Debug for ResumeCookie {
             .field("logon_id", &self.logon_id)
             .finish_non_exhaustive()
     }
+}
+
+/// An RD Gateway and the account to sign in to it with. See
+/// [`gateway`](crate::gateway).
+pub struct Gateway {
+    /// `host` or `host:port`.
+    pub address: String,
+    /// An account of its own (`user`, `DOMAIN\user` or `user@domain`) and
+    /// its password; `None` signs in with the PC's.
+    pub account: Option<(String, Zeroizing<String>)>,
 }
 
 /// Kerberos sign-in for a PC. See [`kerberos`](crate::kerberos).

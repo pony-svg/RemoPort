@@ -108,6 +108,9 @@ pub struct DeviceBookmark {
     /// empty to connect directly.
     #[serde(default)]
     pub gateway: String,
+    /// The gateway's own account; empty to sign in to it with the PC's.
+    #[serde(default)]
+    pub gateway_username: String,
     /// Signs in with Kerberos rather than NTLM.
     #[serde(default)]
     pub kerberos: bool,
@@ -149,6 +152,7 @@ impl DeviceBookmark {
             last_connected: None,
             allow_without_nla: false,
             gateway: String::new(),
+            gateway_username: String::new(),
             kerberos: false,
             kdc: String::new(),
         }

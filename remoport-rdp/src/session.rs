@@ -36,6 +36,7 @@ pub(crate) async fn run(
         framed,
         result,
         mut clipboard,
+        mut microphone,
     } = established;
     let (mut reader, mut writer) = split_tokio_framed(framed);
     let mut image = DecodedImage::new(
@@ -89,6 +90,12 @@ pub(crate) async fn run(
                     apply_command(command, &mut stage, &mut image, &mut writer, &mut input, events).await;
                 }
             }
+            Some(messages) = next_microphone_packet(&mut microphone) => {
+                // A packet that cannot be encoded is a gap in the sound.
+                if let Ok(frame) = stage.encode_dvc_messages(messages) {
+                    writer.write_all(&frame).await.map_err(lost)?;
+                }
+            }
             Some(command) = commands.recv() => {
                 match (&mut clipboard, command) {
                     // Input keeps its order behind a paste the PC has not taken yet.
@@ -140,6 +147,16 @@ pub(crate) async fn run(
                 }
             }
         }
+    }
+}
+
+/// The next microphone packet, or never when the PC may not use it.
+async fn next_microphone_packet(
+    packets: &mut Option<tokio_mpsc::Receiver<Vec<ironrdp_svc::SvcMessage>>>,
+) -> Option<Vec<ironrdp_svc::SvcMessage>> {
+    match packets {
+        Some(packets) => packets.recv().await,
+        None => std::future::pending().await,
     }
 }
 

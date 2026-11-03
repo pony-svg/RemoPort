@@ -67,7 +67,10 @@ pub enum AudioPlaybackMode {
 pub struct RedirectedFolder {
     pub id: Uuid,
     pub path: String,
-    pub read_only: bool,
+    /// The PC may change what is in the folder. Off unless the user turns it
+    /// on; folders saved before this existed come back read-only.
+    #[serde(default)]
+    pub writable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +303,13 @@ mod tests {
         fields.insert("redirect_clipboard".into(), true.into());
         let loaded: DeviceBookmark = serde_json::from_value(old).expect("deserialize");
         assert!(!loaded.share_clipboard);
+    }
+
+    #[test]
+    fn folders_saved_before_are_shared_read_only() {
+        let old = r#"{"id":"6f1b8a2e-3c4d-4e5f-8a9b-0c1d2e3f4a5b","path":"/home/me/Documents","read_only":false}"#;
+        let folder: RedirectedFolder = serde_json::from_str(old).expect("deserialize");
+        assert!(!folder.writable);
     }
 
     #[test]

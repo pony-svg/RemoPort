@@ -20,6 +20,7 @@ use ironrdp_pdu::rdp::capability_sets::{
 };
 use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
 use ironrdp_pdu::rdp::session_info::ServerAutoReconnect;
+use ironrdp_svc::SvcMessage;
 use ironrdp_tokio::TokioFramed;
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
 use tokio::net::TcpStream;
@@ -29,8 +30,13 @@ use crate::clipboard::{self, Clipboard};
 use crate::error::{is_authentication_failure, is_nla_refusal};
 use crate::identity::{self, Verdict};
 use crate::{
-    ConnectConfig, Error, Event, ResumeCookie, TrustReply, gfx, keyboard_layout, net, sound,
+    ConnectConfig, Error, Event, ResumeCookie, TrustReply, drive, gfx, keyboard_layout, microphone,
+    net, sound,
 };
+
+/// Microphone packets waiting for the session; beyond this, sound is dropped
+/// rather than piling up behind a slow link.
+const MICROPHONE_QUEUE: usize = 64;
 
 /// How long the user has to decide about a PC's identity.
 const IDENTITY_DECISION: Duration = Duration::from_secs(300);
@@ -43,6 +49,8 @@ pub(crate) struct Established {
     pub result: ConnectionResult,
     /// The session's side of the clipboard, when it is shared.
     pub clipboard: Option<Clipboard>,
+    /// Microphone packets for the session to send, when the PC may use it.
+    pub microphone: Option<tokio::sync::mpsc::Receiver<Vec<SvcMessage>>>,
 }
 
 pub(crate) async fn connect(
@@ -76,13 +84,18 @@ pub(crate) async fn connect(
     ));
 
     // 2. The connector and its channels: display control (resizing), the
-    // graphics pipeline, and the clipboard and sound when this PC has them.
+    // graphics pipeline, and the clipboard, sound, microphone and folders
+    // when this PC has them.
     let (layout, layout_source) = keyboard_layout::detect_keyboard_layout();
     progress(format!("Keyboard layout: {layout_source}"));
     let sound = config.sound.take();
+    let input = config.microphone.take();
     let playing = sound.is_some();
     let mut connector = with_resume(
-        ClientConnector::new(connector_config(config, layout, playing), client_addr),
+        ClientConnector::new(
+            connector_config(config, layout, playing, input.is_some()),
+            client_addr,
+        ),
         config.resume.as_ref(),
     );
     if let Some(cookie) = &config.resume {
@@ -99,21 +112,29 @@ pub(crate) async fn connect(
             .insert(ironrdp_rdpsnd::client::Rdpsnd::new(Box::new(
                 sound::Handler::new(output),
             )));
-        // Windows sends sound only alongside the device channel; this one
-        // announces no device.
-        connector.static_channels.insert(ironrdp_rdpdr::Rdpdr::new(
-            Box::new(ironrdp_rdpdr::NoopRdpdrBackend),
-            config.client_name.clone(),
-        ));
+    }
+    // The device channel carries the shared folders, and Windows sends sound
+    // only alongside it; without folders it announces no device.
+    let mut drives = 0;
+    if playing || !config.folders.is_empty() {
+        let (backend, announced) = drive::DriveBackend::new(&config.folders, events.clone());
+        drives = announced.len();
+        let mut rdpdr = ironrdp_rdpdr::Rdpdr::new(Box::new(backend), config.client_name.clone());
+        if !announced.is_empty() {
+            rdpdr = rdpdr.with_drives(Some(announced));
+        }
+        connector.static_channels.insert(rdpdr);
     }
     progress(format!(
-        "Clipboard {}, sound {}",
+        "Clipboard {}, sound {}, microphone {}, {drives} shared folder{}",
         if clipboard.is_some() {
             "shared (text)"
         } else {
             "not shared"
         },
         if playing { "played here" } else { "off" },
+        if input.is_some() { "allowed" } else { "off" },
+        if drives == 1 { "" } else { "s" },
     ));
     let ready = events.clone();
     let display_control = ironrdp_displaycontrol::client::DisplayControlClient::new(move |_caps| {
@@ -124,9 +145,30 @@ pub(crate) async fn connect(
     progress(decoder_note);
     let graphics =
         GraphicsPipelineClient::new(Box::new(gfx::Handler::new(events.clone())), decoder);
-    let drdynvc = DrdynvcClient::new()
+    let mut drdynvc = DrdynvcClient::new()
         .with_dynamic_channel(display_control)
         .with_dynamic_channel(graphics);
+    // Microphone packets are sent between the PC's turns, so the channel
+    // queues them for the session.
+    let microphone = input.map(|input| {
+        let (queue, packets) = tokio::sync::mpsc::channel(MICROPHONE_QUEUE);
+        let uplink: ironrdp_rdpeai::client::DvcUplink = Box::new(move |_channel, messages| {
+            // A full queue drops this packet: a gap, not a growing delay.
+            match queue.try_send(messages) {
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    Err(ironrdp_pdu::pdu_other_err!("the session has ended"))
+                }
+                _ => Ok(()),
+            }
+        });
+        drdynvc = std::mem::take(&mut drdynvc).with_dynamic_channel(
+            ironrdp_rdpeai::client::RdpeaiClient::new(
+                Box::new(microphone::Handler::new(input, events.clone())),
+                uplink,
+            ),
+        );
+        packets
+    });
     // Advertising the pipeline early is what makes Windows open it at all.
     connector.config.support_dyn_vc_gfx_protocol = true;
     connector.static_channels.insert(drdynvc);
@@ -179,6 +221,7 @@ pub(crate) async fn connect(
             framed,
             result,
             clipboard,
+            microphone,
         }),
         Ok(Ok(ConnectionOutcome::Redirected(_))) => Err(Error::BrokerRedirect),
         Ok(Err(e)) => {
@@ -264,7 +307,12 @@ fn negotiation_error(error: &ConnectorError, allow_without_nla: bool) -> Error {
 ///
 /// SECURITY: `Credentials`, `Config` and the connector derive `Debug` without
 /// redacting the password: never format them.
-fn connector_config(config: &ConnectConfig, keyboard_layout: u32, sound: bool) -> Config {
+fn connector_config(
+    config: &ConnectConfig,
+    keyboard_layout: u32,
+    sound: bool,
+    microphone: bool,
+) -> Config {
     let credentials = Credentials::UsernamePassword {
         username: config.username.clone(),
         // IronRDP needs an owned String; that copy is IronRDP's to keep.
@@ -314,7 +362,7 @@ fn connector_config(config: &ConnectConfig, keyboard_layout: u32, sound: bool) -
         request_data: None,
         autologon,
         enable_audio_playback: sound,
-        enable_audio_capture: false,
+        enable_audio_capture: microphone,
         performance_flags: PerformanceFlags::default(),
         license_cache: None,
         timezone_info: timezone_info(),
@@ -368,6 +416,8 @@ mod tests {
             client_name: "test".to_string(),
             clipboard: false,
             sound: None,
+            microphone: None,
+            folders: Vec::new(),
             resume: None,
         }
     }
@@ -376,7 +426,7 @@ mod tests {
     fn only_a_reconnection_presents_the_cookie_and_never_prints_it() {
         let fresh = || {
             ClientConnector::new(
-                connector_config(&config(), 0x409, false),
+                connector_config(&config(), 0x409, false, false),
                 std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             )
         };

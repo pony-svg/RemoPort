@@ -12,8 +12,12 @@
 //! - The clipboard is shared, as text, only with the PCs the user allows it:
 //!   the PC gets only what the user pastes into it. See
 //!   [`clipboard`](crate::clipboard).
-//! - The PC's sound can be played here, as uncompressed PCM only. No drive,
-//!   printer, smart card, microphone or camera is offered.
+//! - The PC's sound can be played here, and the microphone and local folders
+//!   offered to it, each only for the PCs the user allows. The microphone
+//!   runs only while the PC holds it open; a shared folder confines the PC
+//!   to it and is read-only unless the user allows writing. See
+//!   [`microphone`](crate::microphone) and [`drive`](crate::drive). No
+//!   printer, smart card or camera is offered.
 //! - A dropped connection can resume the same session: the PC's cookie for it
 //!   ([`ResumeCookie`]) is wiped when dropped, never printed and never saved.
 //!
@@ -22,10 +26,12 @@
 
 mod clipboard;
 mod connect;
+mod drive;
 mod error;
 mod gfx;
 mod identity;
 mod keyboard_layout;
+mod microphone;
 mod net;
 mod session;
 mod sound;
@@ -34,8 +40,10 @@ pub use error::Error;
 pub use identity::{
     CertificateInfo, IdentityProblem, TrustStore, TrustedServer, fingerprint, write_private,
 };
+pub use microphone::{MicrophonePackets, SoundInput};
 pub use sound::SoundOutput;
 
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -64,6 +72,10 @@ pub struct ConnectConfig {
     pub clipboard: bool,
     /// Plays this PC's sound here; `None` leaves it silent.
     pub sound: Option<Box<dyn SoundOutput>>,
+    /// Lets this PC use the microphone; `None` offers none.
+    pub microphone: Option<Box<dyn SoundInput>>,
+    /// Local folders this PC sees as drives.
+    pub folders: Vec<SharedFolder>,
     /// Resumes the session this cookie came from, after a dropped connection.
     pub resume: Option<ResumeCookie>,
 }
@@ -95,6 +107,14 @@ impl std::fmt::Debug for ResumeCookie {
             .field("logon_id", &self.logon_id)
             .finish_non_exhaustive()
     }
+}
+
+/// A local folder the PC sees as a drive under `\\tsclient`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedFolder {
+    pub path: PathBuf,
+    /// The PC may read the folder but not change it.
+    pub read_only: bool,
 }
 
 /// Clipboard text: wiped from memory when dropped, and never printed.
@@ -185,6 +205,8 @@ pub enum Event {
     PointerHidden(bool),
     /// The PC copied this text. It is the app's to take or leave.
     Clipboard(ClipboardText),
+    /// The PC opened (`true`) or closed the microphone.
+    Microphone(bool),
     /// The PC issued (or renewed, hourly) the cookie that resumes this
     /// session after a dropped connection; keep the latest.
     ResumeCookie(ResumeCookie),

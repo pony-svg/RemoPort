@@ -15,9 +15,11 @@ use egui::{
 };
 use remoport_rdp::{
     CertificateInfo, ClipboardText, Command, ConnectConfig, Error, Event as EngineEvent,
-    IdentityProblem, MouseButton, Rect as RemoteRect, ResumeCookie, Session, SoundOutput,
-    TrustReply, TrustStore,
+    IdentityProblem, MouseButton, Rect as RemoteRect, ResumeCookie, Session, SharedFolder,
+    SoundInput, SoundOutput, TrustReply, TrustStore,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -170,6 +172,10 @@ pub struct ActiveSession {
     session_password: Option<Zeroizing<String>>,
     /// The PC's latest cookie for resuming this session.
     resume: Option<ResumeCookie>,
+    /// The PC has the microphone open.
+    microphone_live: bool,
+    /// The user muted the microphone; the PC then gets silence.
+    microphone_muted: Arc<AtomicBool>,
 }
 
 impl ActiveSession {
@@ -204,6 +210,8 @@ impl ActiveSession {
             remote_copy: None,
             session_password: None,
             resume: None,
+            microphone_live: false,
+            microphone_muted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -297,6 +305,30 @@ impl ActiveSession {
                         self.bookmark.pc_name
                     ));
                     *on_disconnect = true;
+                }
+                if connected && self.microphone_live {
+                    let muted = self.microphone_muted.load(Ordering::Relaxed);
+                    let label = if muted {
+                        RichText::new("● Microphone muted")
+                    } else {
+                        RichText::new("● Microphone on").color(DANGER)
+                    };
+                    if ui
+                        .button(label)
+                        .on_hover_text(if muted {
+                            "The PC gets silence. Click to unmute."
+                        } else {
+                            "The PC is using your microphone. Click to mute."
+                        })
+                        .clicked()
+                    {
+                        self.microphone_muted.store(!muted, Ordering::Relaxed);
+                        logging::event(if muted {
+                            "Microphone unmuted"
+                        } else {
+                            "Microphone muted"
+                        });
+                    }
                 }
                 if connected && ui.button("⌨ Ctrl+Alt+Del").clicked() {
                     logging::event("Sent Ctrl+Alt+Del");
@@ -492,8 +524,22 @@ impl ActiveSession {
 
         let sound = (self.bookmark.audio_playback == AudioPlaybackMode::LocalDevice)
             .then(|| Box::new(crate::audio::Speaker::new()) as Box<dyn SoundOutput>);
+        let microphone = self.bookmark.redirect_microphones.then(|| {
+            Box::new(crate::audio::Microphone::new(Arc::clone(
+                &self.microphone_muted,
+            ))) as Box<dyn SoundInput>
+        });
+        let folders: Vec<SharedFolder> = self
+            .bookmark
+            .redirected_folders
+            .iter()
+            .map(|folder| SharedFolder {
+                path: folder.path.clone().into(),
+                read_only: !folder.writable,
+            })
+            .collect();
         logging::event(format_args!(
-            "{} {host}:{port} as {}{} at {width}×{height}{}{}{}{}",
+            "{} {host}:{port} as {}{} at {width}×{height}{}{}{}{}{}{}",
             if self.resume.is_some() {
                 "Resuming the session on"
             } else {
@@ -525,6 +571,16 @@ impl ActiveSession {
             } else {
                 ", no sound"
             },
+            if microphone.is_some() {
+                ", microphone allowed"
+            } else {
+                ""
+            },
+            if folders.is_empty() {
+                String::new()
+            } else {
+                format!(", {} shared folder(s)", folders.len())
+            },
         ));
         self.session = Some(Session::start(ConnectConfig {
             host: host.to_string(),
@@ -540,6 +596,8 @@ impl ActiveSession {
             client_name: client_name(),
             clipboard: self.bookmark.share_clipboard,
             sound,
+            microphone,
+            folders,
             resume: self.resume.clone(),
         }));
         true
@@ -634,6 +692,7 @@ impl ActiveSession {
             }
             EngineEvent::PointerHidden(hidden) => self.remote_cursor_hidden = hidden,
             EngineEvent::Clipboard(text) => self.remote_copy = Some(text),
+            EngineEvent::Microphone(live) => self.microphone_live = live,
             EngineEvent::ResumeCookie(cookie) => {
                 logging::event("The PC gave a cookie to resume this session after a drop");
                 self.resume = Some(cookie);
@@ -736,6 +795,7 @@ impl ActiveSession {
         self.requested_size = None;
         self.modifiers = Modifiers::NONE;
         self.remote_copy = None;
+        self.microphone_live = false;
     }
 
     fn send(&self, command: Command) {

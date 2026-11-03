@@ -81,6 +81,8 @@ fn config(port: u16, store: &TrustStore) -> ConnectConfig {
         client_name: "remoport-test".to_string(),
         clipboard: false,
         sound: None,
+        microphone: None,
+        folders: Vec::new(),
         resume: None,
     }
 }

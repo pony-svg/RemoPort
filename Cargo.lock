@@ -2972,6 +2972,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironrdp-rdpeai"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1426e26834dc30dcdb79d2a0967f2a181264db1940cceeab6edf58a78caebf5"
+dependencies = [
+ "ironrdp-core",
+ "ironrdp-dvc",
+ "ironrdp-pdu",
+ "ironrdp-rdpsnd",
+ "ironrdp-svc",
+ "tracing",
+]
+
+[[package]]
 name = "ironrdp-rdpei"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4771,10 +4785,13 @@ dependencies = [
  "ironrdp-input",
  "ironrdp-pdu",
  "ironrdp-rdpdr",
+ "ironrdp-rdpeai",
  "ironrdp-rdpsnd",
  "ironrdp-session",
+ "ironrdp-svc",
  "ironrdp-tls",
  "ironrdp-tokio",
+ "nix 0.29.0",
  "rcgen",
  "rustls-native-certs",
  "rustls-pki-types",
@@ -4783,6 +4800,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "socket2 0.6.5",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-native-tls",

@@ -1,18 +1,19 @@
-//! The PC's sound on this computer's speakers, through cpal.
+//! The PC's sound on this computer's speakers, and this computer's
+//! microphone for the PC, through cpal.
 //!
-//! The engine hands samples over on its own thread; the output stream lives
-//! on a thread of its own, since some platforms do not let a stream move
-//! between threads. The buffer and the volume follow RustConn's player
+//! The engine calls in on its own thread; each stream lives on a thread of
+//! its own, since some platforms do not let a stream move between threads.
+//! The buffer, the volume and the packet builder follow RustConn's audio
 //! (`rustconn`, GPL-3.0-or-later).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use remoport_rdp::SoundOutput;
+use remoport_rdp::{MicrophonePackets, SoundInput, SoundOutput};
 
 use crate::logging;
 
@@ -185,6 +186,151 @@ fn fill<T: Copy>(
             None => silence,
         };
     }
+}
+
+/// This computer's microphone, captured only between the PC's `start` and
+/// `stop`, and silenced while `muted` is set.
+pub struct Microphone {
+    muted: Arc<AtomicBool>,
+    stream: Option<Stream>,
+}
+
+impl Microphone {
+    pub fn new(muted: Arc<AtomicBool>) -> Self {
+        Self {
+            muted,
+            stream: None,
+        }
+    }
+}
+
+impl SoundInput for Microphone {
+    fn start(
+        &mut self,
+        rate: u32,
+        channels: u16,
+        packet_bytes: usize,
+        packets: MicrophonePackets,
+    ) -> bool {
+        self.stop();
+        let muted = Arc::clone(&self.muted);
+        let (started, ready) = mpsc::channel();
+        let (stop, stopped) = mpsc::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("remoport-microphone".to_string())
+            .spawn(move || {
+                let builder = PacketBuilder::new(packet_bytes, packets, muted);
+                match capture(rate, channels, builder) {
+                    Ok(stream) => {
+                        let _ = started.send(true);
+                        // Captures until the PC closes the microphone.
+                        let _ = stopped.recv();
+                        drop(stream);
+                    }
+                    Err(e) => {
+                        logging::event(format_args!("The microphone cannot be opened: {e}"));
+                        let _ = started.send(false);
+                    }
+                }
+            });
+        let Ok(thread) = thread else {
+            return false;
+        };
+        let ok = ready.recv_timeout(Duration::from_secs(5)).unwrap_or(false);
+        self.stream = Some(Stream { stop, thread });
+        if !ok {
+            self.stop();
+        }
+        ok
+    }
+
+    fn stop(&mut self) {
+        if let Some(Stream { stop, thread }) = self.stream.take() {
+            drop(stop);
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for Microphone {
+    fn drop(&mut self) {
+        SoundInput::stop(self);
+    }
+}
+
+/// Gathers captured samples into the packets the PC expects.
+struct PacketBuilder {
+    pending: Vec<u8>,
+    packet_bytes: usize,
+    packets: MicrophonePackets,
+    muted: Arc<AtomicBool>,
+}
+
+impl PacketBuilder {
+    fn new(packet_bytes: usize, packets: MicrophonePackets, muted: Arc<AtomicBool>) -> Self {
+        let packet_bytes = packet_bytes.clamp(2, 1 << 20);
+        Self {
+            pending: Vec::with_capacity(packet_bytes * 2),
+            packet_bytes,
+            packets,
+            muted,
+        }
+    }
+
+    fn push(&mut self, samples: impl IntoIterator<Item = i16>) {
+        let muted = self.muted.load(Ordering::Relaxed);
+        for sample in samples {
+            let sample = if muted { 0 } else { sample };
+            self.pending.extend_from_slice(&sample.to_le_bytes());
+        }
+        while self.pending.len() >= self.packet_bytes {
+            let rest = self.pending.split_off(self.packet_bytes);
+            self.packets
+                .send(std::mem::replace(&mut self.pending, rest));
+        }
+    }
+}
+
+/// The default input, as 16-bit samples where the device gives them, else
+/// floats converted.
+fn capture(rate: u32, channels: u16, builder: PacketBuilder) -> Result<cpal::Stream, String> {
+    let device = cpal::default_host()
+        .default_input_device()
+        .ok_or("this computer has no microphone")?;
+    let config = cpal::StreamConfig {
+        channels,
+        sample_rate: rate,
+        buffer_size: cpal::BufferSize::Default,
+    };
+    let builder = Arc::new(Mutex::new(builder));
+    let i16_builder = Arc::clone(&builder);
+    let stream = device
+        .build_input_stream(
+            config,
+            move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                if let Ok(mut builder) = i16_builder.lock() {
+                    builder.push(data.iter().copied());
+                }
+            },
+            |e| logging::event(format_args!("Microphone error: {e}")),
+            None,
+        )
+        .or_else(|_| {
+            device.build_input_stream(
+                config,
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    if let Ok(mut builder) = builder.lock() {
+                        // `as` saturates; the clamp keeps the scale honest.
+                        builder.push(data.iter().map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i16));
+                    }
+                },
+                |e| logging::event(format_args!("Microphone error: {e}")),
+                None,
+            )
+        })
+        .map_err(|e| e.to_string())?;
+    stream.play().map_err(|e| e.to_string())?;
+    Ok(stream)
 }
 
 #[cfg(test)]

@@ -37,6 +37,8 @@ pub struct AddEditPcDialog {
     pub redirected_folders: Vec<RedirectedFolder>,
     pub allow_without_nla: bool,
     pub new_folder_path: String,
+    /// Why the folder typed could not be added.
+    pub folder_error: Option<String>,
     pub validation_error: Option<String>,
     /// The PC being edited, so Save keeps what the dialog does not show
     /// (favorite, last connection, identity). `None` when adding.
@@ -68,6 +70,7 @@ impl Default for AddEditPcDialog {
             redirected_folders: Vec::new(),
             allow_without_nla: false,
             new_folder_path: "".to_string(),
+            folder_error: None,
             validation_error: None,
             original: None,
         }
@@ -113,6 +116,7 @@ impl AddEditPcDialog {
         self.allow_without_nla = bookmark.allow_without_nla;
         self.original = Some(bookmark.clone());
         self.validation_error = None;
+        self.folder_error = None;
     }
 
     pub fn show(&mut self, ctx: &Context, theme: &Theme, on_save: &mut Option<DeviceBookmark>) {
@@ -381,12 +385,24 @@ impl AddEditPcDialog {
             .wrap(),
         );
         ui.add_space(6.0);
+        ui.checkbox(&mut self.redirect_microphones, "Microphone");
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(
+                    "The PC can use it only while it asks for it, and Remoport shows when it is \
+                     on, with a button to mute it.",
+                )
+                .weak()
+                .size(12.0),
+            )
+            .wrap(),
+        );
+        ui.add_space(6.0);
         // Not built yet: shown off, so nothing suggests they are shared.
         ui.add_enabled_ui(false, |ui| {
             for (label, value) in [
                 ("Printers", &mut self.redirect_printers),
                 ("Smart cards", &mut self.redirect_smartcards),
-                ("Microphones", &mut self.redirect_microphones),
                 ("Cameras", &mut self.redirect_cameras),
                 ("WebAuthn / Passkeys", &mut self.redirect_webauthn),
             ] {
@@ -408,14 +424,35 @@ impl AddEditPcDialog {
                     .desired_width(280.0),
             );
             if ui.button("+ Add Folder").clicked() && !self.new_folder_path.trim().is_empty() {
-                self.redirected_folders.push(RedirectedFolder {
-                    id: Uuid::new_v4(),
-                    path: self.new_folder_path.trim().to_string(),
-                    read_only: false,
-                });
-                self.new_folder_path.clear();
+                let path = expand_home(self.new_folder_path.trim());
+                if std::path::Path::new(&path).is_dir() {
+                    logging::event(format_args!("Folder added to share: {path}"));
+                    self.redirected_folders.push(RedirectedFolder {
+                        id: Uuid::new_v4(),
+                        path,
+                        writable: false,
+                    });
+                    self.new_folder_path.clear();
+                    self.folder_error = None;
+                } else {
+                    self.folder_error = Some(format!("{path} is not a folder on this computer."));
+                }
             }
         });
+        if let Some(error) = &self.folder_error {
+            ui.colored_label(Color32::from_rgb(0xc4, 0x2b, 0x1c), error);
+        }
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(
+                    "The PC sees each folder as a drive and cannot reach anything outside it. \
+                     Folders are read-only unless you allow changes.",
+                )
+                .weak()
+                .size(12.0),
+            )
+            .wrap(),
+        );
 
         ui.add_space(8.0);
 
@@ -432,7 +469,7 @@ impl AddEditPcDialog {
                     for (i, folder) in self.redirected_folders.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label(format!("📁 {}", folder.path));
-                            ui.checkbox(&mut folder.read_only, "Read-only");
+                            ui.checkbox(&mut folder.writable, "Allow changes");
                             if ui.button("❌").clicked() {
                                 remove_index = Some(i);
                             }
@@ -531,5 +568,13 @@ impl AddWorkspaceDialog {
             logging::event("Workspace dialog: closed with ×");
         }
         self.is_open = is_open && !close;
+    }
+}
+
+/// `~/…` as a path under the home folder.
+fn expand_home(path: &str) -> String {
+    match (path.strip_prefix("~/"), std::env::var("HOME")) {
+        (Some(rest), Ok(home)) => format!("{}/{rest}", home.trim_end_matches('/')),
+        _ => path.to_string(),
     }
 }

@@ -23,7 +23,6 @@ use ironrdp_pdu::rdp::session_info::ServerAutoReconnect;
 use ironrdp_svc::SvcMessage;
 use ironrdp_tokio::TokioFramed;
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
-use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 use crate::clipboard::{self, Clipboard};
@@ -41,7 +40,14 @@ const MICROPHONE_QUEUE: usize = 64;
 /// How long the user has to decide about a PC's identity.
 const IDENTITY_DECISION: Duration = Duration::from_secs(300);
 
-pub(crate) type Framed = TokioFramed<ironrdp_tls::TlsStream<TcpStream>>;
+/// A direct connection or a gateway tunnel, as the rest of the sequence sees it.
+pub(crate) trait Transport:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync
+{
+}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync> Transport for T {}
+
+pub(crate) type Framed = TokioFramed<ironrdp_tls::TlsStream<Box<dyn Transport>>>;
 
 /// A signed-in connection, ready for the session.
 pub(crate) struct Established {
@@ -61,27 +67,44 @@ pub(crate) async fn connect(
         let _ = events.send(Event::Progress(message));
     };
 
-    // 1. Reach the PC.
-    let stream = timeout(config.timeout, net::connect_tcp(&config.host, config.port))
-        .await
-        .map_err(|_| Error::Timeout("reaching the PC"))?
-        .map_err(|e| {
-            Error::Unreachable(format!(
-                "{}:{} could not be reached: {e}",
-                config.host, config.port
-            ))
-        })?;
-    net::tune(&stream);
-    let client_addr = stream
-        .local_addr()
-        .map_err(|e| Error::Unreachable(e.to_string()))?;
-    progress(format!(
-        "Reached {} at {}",
-        config.host,
-        stream
-            .peer_addr()
-            .map_or_else(|_| "?".to_string(), |a| a.to_string())
-    ));
+    // 1. Reach the PC, directly or through its RD Gateway.
+    let (stream, client_addr): (Box<dyn Transport>, _) = match config.gateway.as_deref() {
+        Some(gateway) => {
+            progress(format!("Opening a tunnel through the RD Gateway {gateway}"));
+            let (tunnel, client_addr) =
+                timeout(config.timeout, crate::gateway::open(gateway, config))
+                    .await
+                    .map_err(|_| Error::Timeout("reaching the RD Gateway"))??;
+            progress(format!(
+                "Reached {} through {gateway} (its certificate verified)",
+                config.host
+            ));
+            (Box::new(tunnel), client_addr)
+        }
+        None => {
+            let stream = timeout(config.timeout, net::connect_tcp(&config.host, config.port))
+                .await
+                .map_err(|_| Error::Timeout("reaching the PC"))?
+                .map_err(|e| {
+                    Error::Unreachable(format!(
+                        "{}:{} could not be reached: {e}",
+                        config.host, config.port
+                    ))
+                })?;
+            net::tune(&stream);
+            let client_addr = stream
+                .local_addr()
+                .map_err(|e| Error::Unreachable(e.to_string()))?;
+            progress(format!(
+                "Reached {} at {}",
+                config.host,
+                stream
+                    .peer_addr()
+                    .map_or_else(|_| "?".to_string(), |a| a.to_string())
+            ));
+            (Box::new(stream), client_addr)
+        }
+    };
 
     // 2. The connector and its channels: display control (resizing), the
     // graphics pipeline, and the clipboard, sound, microphone and folders
@@ -418,6 +441,7 @@ mod tests {
             sound: None,
             microphone: None,
             folders: Vec::new(),
+            gateway: None,
             resume: None,
         }
     }

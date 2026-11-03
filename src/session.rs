@@ -582,6 +582,12 @@ impl ActiveSession {
                 format!(", {} shared folder(s)", folders.len())
             },
         ));
+        if !self.bookmark.gateway.trim().is_empty() {
+            logging::event(format_args!(
+                "Through the RD Gateway {}",
+                self.bookmark.gateway.trim()
+            ));
+        }
         self.session = Some(Session::start(ConnectConfig {
             host: host.to_string(),
             port,
@@ -598,6 +604,7 @@ impl ActiveSession {
             sound,
             microphone,
             folders,
+            gateway: Some(self.bookmark.gateway.trim().to_string()).filter(|g| !g.is_empty()),
             resume: self.resume.clone(),
         }));
         true
@@ -1238,7 +1245,9 @@ fn client_name() -> String {
 fn worth_retrying(error: &Error, reconnecting: bool) -> bool {
     match error {
         Error::ConnectionLost(_) => true,
-        Error::Unreachable(_) | Error::Timeout(_) | Error::Protocol(_) => reconnecting,
+        Error::Unreachable(_) | Error::Timeout(_) | Error::Protocol(_) | Error::Gateway(_) => {
+            reconnecting
+        }
         _ => false,
     }
 }

@@ -83,6 +83,7 @@ fn config(port: u16, store: &TrustStore) -> ConnectConfig {
         sound: None,
         microphone: None,
         folders: Vec::new(),
+        gateway: None,
         resume: None,
     }
 }
@@ -221,5 +222,51 @@ async fn a_server_without_nla_is_refused() {
         matches!(event, Event::Ended(Some(Error::NlaUnavailable))),
         "got {event:?}"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A gateway whose certificate this computer does not trust: the TLS
+/// handshake fails on Remoport's side, so the gateway never gets the HTTP
+/// request that carries the sign-in.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_untrusted_gateway_never_gets_the_credentials() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (identity, _) = self_signed();
+    let (report, received) = oneshot::channel();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let acceptor = tokio_native_tls::TlsAcceptor::from(
+            tokio_native_tls::native_tls::TlsAcceptor::new(identity).expect("acceptor"),
+        );
+        let got = match acceptor.accept(stream).await {
+            Ok(mut secure) => {
+                let mut buf = vec![0u8; 4096];
+                match tokio::time::timeout(Duration::from_secs(3), secure.read(&mut buf)).await {
+                    Ok(Ok(n)) => buf[..n].to_vec(),
+                    _ => Vec::new(),
+                }
+            }
+            Err(_) => Vec::new(),
+        };
+        let _ = report.send(got);
+    });
+
+    let (dir, store) = scratch_store("gateway");
+    let mut settings = config(3389, &store);
+    settings.host = "pc.internal.example".to_string();
+    settings.gateway = Some(format!("localhost:{port}"));
+    let session = Session::start(settings);
+    match next_event(&session).await {
+        Event::Ended(Some(Error::Gateway(why))) => assert!(why.contains("not trusted"), "{why}"),
+        other => panic!("expected the gateway to be refused, got {other:?}"),
+    }
+    let got = tokio::time::timeout(Duration::from_secs(5), received)
+        .await
+        .expect("the fake gateway reports")
+        .unwrap_or_default();
+    assert!(got.is_empty(), "the gateway received {} bytes", got.len());
     let _ = std::fs::remove_dir_all(dir);
 }

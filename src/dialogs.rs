@@ -36,6 +36,7 @@ pub struct AddEditPcDialog {
     pub redirect_webauthn: bool,
     pub redirected_folders: Vec<RedirectedFolder>,
     pub allow_without_nla: bool,
+    pub gateway: String,
     pub new_folder_path: String,
     /// Why the folder typed could not be added.
     pub folder_error: Option<String>,
@@ -69,6 +70,7 @@ impl Default for AddEditPcDialog {
             redirect_webauthn: false,
             redirected_folders: Vec::new(),
             allow_without_nla: false,
+            gateway: String::new(),
             new_folder_path: "".to_string(),
             folder_error: None,
             validation_error: None,
@@ -114,6 +116,7 @@ impl AddEditPcDialog {
         self.redirect_webauthn = bookmark.redirect_webauthn;
         self.redirected_folders = bookmark.redirected_folders.clone();
         self.allow_without_nla = bookmark.allow_without_nla;
+        self.gateway = bookmark.gateway.clone();
         self.original = Some(bookmark.clone());
         self.validation_error = None;
         self.folder_error = None;
@@ -207,6 +210,7 @@ impl AddEditPcDialog {
                                 bookmark.redirect_webauthn = self.redirect_webauthn;
                                 bookmark.redirected_folders = self.redirected_folders.clone();
                                 bookmark.allow_without_nla = self.allow_without_nla;
+                                bookmark.gateway = self.gateway.trim().to_string();
 
                                 logging::event(format_args!(
                                     "{title}: saved \"{}\" ({}) in group \"{}\"",
@@ -272,7 +276,25 @@ impl AddEditPcDialog {
                         .desired_width(320.0),
                 );
                 ui.end_row();
+
+                ui.label("RD Gateway:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.gateway)
+                        .hint_text("Optional, e.g. gateway.example.com")
+                        .desired_width(320.0),
+                );
+                ui.end_row();
             });
+        if !self.gateway.trim().is_empty() {
+            ui.label(
+                egui::RichText::new(
+                    "Signs in to the gateway with this PC's account. Its certificate must come \
+                     from an authority this computer trusts.",
+                )
+                .size(11.5)
+                .weak(),
+            );
+        }
 
         ui.add_space(12.0);
         ui.checkbox(

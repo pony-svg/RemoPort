@@ -102,6 +102,10 @@ pub struct DeviceBookmark {
     /// Level Authentication. Off unless the user turns it on for this PC.
     #[serde(default)]
     pub allow_without_nla: bool,
+    /// The RD Gateway this PC is reached through (`host` or `host:port`);
+    /// empty to connect directly.
+    #[serde(default)]
+    pub gateway: String,
 }
 
 impl DeviceBookmark {
@@ -132,6 +136,7 @@ impl DeviceBookmark {
             is_favorite: false,
             last_connected: None,
             allow_without_nla: false,
+            gateway: String::new(),
         }
     }
 

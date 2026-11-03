@@ -5,6 +5,9 @@
 //!   from an authority this computer trusts is accepted, anything else is put
 //!   to the user, and a certificate that changed since the user trusted it is
 //!   presented as the warning it is. See [`identity`](crate::identity).
+//! - An RD Gateway must present a certificate from an authority this computer
+//!   trusts; any other is refused before credentials are sent. See
+//!   [`gateway`](crate::gateway).
 //! - Network Level Authentication is required unless a PC is explicitly
 //!   allowed to sign in without it; the original RDP security is never used.
 //! - The password lives in zeroizing memory on Remoport's side; IronRDP's
@@ -28,6 +31,7 @@ mod clipboard;
 mod connect;
 mod drive;
 mod error;
+mod gateway;
 mod gfx;
 mod identity;
 mod keyboard_layout;
@@ -76,6 +80,9 @@ pub struct ConnectConfig {
     pub microphone: Option<Box<dyn SoundInput>>,
     /// Local folders this PC sees as drives.
     pub folders: Vec<SharedFolder>,
+    /// The RD Gateway to reach this PC through, as `host` or `host:port`;
+    /// it signs in with the PC's credentials.
+    pub gateway: Option<String>,
     /// Resumes the session this cookie came from, after a dropped connection.
     pub resume: Option<ResumeCookie>,
 }

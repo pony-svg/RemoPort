@@ -12,8 +12,8 @@ side by side, and workspaces that bring in what your organization offers.
 > and mouse work, the desktop follows the window's size, and the PC's sound and a
 > shared text clipboard can be turned on per PC, and a dropped connection comes back
 > to the same session; the microphone and local folders can be offered per PC too.
-> This still awaits testing against real servers. RD Gateway, several monitors and
-> Kerberos come next.
+> PCs behind an RD Gateway are reached through it. This still awaits testing against
+> real servers. Kerberos and several monitors come next.
 
 ## Security
 
@@ -21,6 +21,9 @@ side by side, and workspaces that bring in what your organization offers.
   an authority this computer trusts is accepted; any other is shown to you with its
   SHA-256 fingerprint, and nothing is sent until you trust it. A certificate that
   changed since you trusted it is flagged as a possible interception.
+- **An RD Gateway must prove who it is**: its certificate has to come from an authority
+  this computer trusts and match its name, or Remoport refuses it before sending your
+  credentials. The PC behind it is still checked as above.
 - **Network Level Authentication is required**, unless you allow a specific PC to
   sign in without it. The original RDP security is never used.
 - **Passwords are remembered only if you ask, and only in the system keyring**
@@ -71,11 +74,12 @@ te ofrece.
 > y ratón funcionan, el escritorio se ajusta al tamaño de la ventana, y el sonido del
 > PC y un portapapeles de texto compartido se activan por PC, una conexión caída
 > vuelve a la misma sesión, y el micrófono y carpetas locales también se ofrecen por
-> PC; falta probarlo contra servidores reales. RD Gateway, varios monitores y
-> Kerberos vienen después.
+> PC, y a los PCs detrás de un RD Gateway se llega a través de él; falta probarlo
+> contra servidores reales. Kerberos y varios monitores vienen después.
 
 **Seguridad:** Remoport confirma la identidad del PC antes de usar tu contraseña (y te
-muestra la huella del certificado si no puede verificarlo), exige autenticación a nivel
+muestra la huella del certificado si no puede verificarlo), rechaza un RD Gateway cuyo
+certificado no venga de una autoridad de confianza antes de enviarle nada, exige autenticación a nivel
 de red (NLA) salvo que lo permitas para un PC concreto, guarda contraseñas solo si lo
 pides y solo en el llavero del sistema (mientras dura una sesión la contraseña queda en
 memoria para reconectar, y se borra al terminar), no comparte nada con un PC salvo lo que actives

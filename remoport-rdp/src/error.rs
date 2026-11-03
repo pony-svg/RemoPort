@@ -31,6 +31,9 @@ pub enum Error {
     /// An established session lost its connection.
     #[error("the connection was lost: {0}")]
     ConnectionLost(String),
+    /// The RD Gateway refused or failed the tunnel to the PC.
+    #[error("{0}")]
+    Gateway(String),
 }
 
 impl Error {

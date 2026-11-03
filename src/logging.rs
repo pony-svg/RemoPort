@@ -32,17 +32,26 @@ fn open() -> Option<Mutex<File>> {
     if cfg!(test) {
         return None;
     }
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+
     let path = log_path()?;
-    std::fs::create_dir_all(path.parent()?).ok()?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path.parent()?)
+        .ok()?;
     if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > MAX_BYTES) {
         let _ = std::fs::rename(&path, path.with_extension("log.old"));
     }
-    OpenOptions::new()
+    // Private: the log names the PCs the user connects to.
+    let file = OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
         .open(&path)
-        .ok()
-        .map(Mutex::new)
+        .ok()?;
+    let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    Some(Mutex::new(file))
 }
 
 /// Records one event. Logging never fails the caller: a log that cannot be

@@ -6,6 +6,7 @@ description = "Connect to your remote computers and apps"
 license = "GPL-3.0-or-later"
 
 [workspace]
+members = ["remoport-rdp"]
 
 [dependencies]
 eframe = "0.28"
@@ -16,5 +17,7 @@ serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 zeroize = "1"
-# RustConn's IronRDP engine (GPL-3.0-or-later), pinned to a reviewed commit.
-rustconn-core = { git = "https://github.com/totoshko88/RustConn", rev = "a997e0de6e3536d149c95c26dfa358cc4021238d", features = ["rdp-embedded", "gfx-h264"] }
+remoport-rdp = { path = "remoport-rdp" }
+# Remembered passwords live only in the system keyring (Secret Service), and
+# travel to it over an encrypted D-Bus session.
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }

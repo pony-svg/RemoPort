@@ -6,12 +6,26 @@ Remoport is a desktop client for reaching Windows PCs, remote desktops and the a
 your organization publishes, with a clean connection center: favorites, PCs and apps
 side by side, and workspaces that bring in what your organization offers.
 
-> **Status: early preview.** Remote desktops open inside Remoport through the RDP
-> engine of [RustConn](https://github.com/totoshko88/RustConn) by Anton Isaiev
-> (IronRDP-based, GPL-3.0-or-later). This first phase covers the screen, keyboard and
-> mouse, and a desktop that follows the window's size; it still awaits testing against
-> real servers. Clipboard, sound and shared folders come next; meanwhile any session
-> can also be opened in FreeRDP.
+> **Status: early preview.** Remote desktops open inside Remoport through its own
+> RDP engine, [`remoport-rdp`](remoport-rdp), built on IronRDP with parts from
+> [RustConn](https://github.com/totoshko88/RustConn) by Anton Isaiev. Screen, keyboard
+> and mouse work and the desktop follows the window's size; this still awaits testing
+> against real servers. Clipboard, sound and shared folders come next.
+
+## Security
+
+- **The PC's identity is confirmed before your password is used.** A certificate from
+  an authority this computer trusts is accepted; any other is shown to you with its
+  SHA-256 fingerprint, and nothing is sent until you trust it. A certificate that
+  changed since you trusted it is flagged as a possible interception.
+- **Network Level Authentication is required**, unless you allow a specific PC to
+  sign in without it. The original RDP security is never used.
+- **Passwords are remembered only if you ask, and only in the system keyring**
+  (KWallet or GNOME Keyring). In memory they are wiped once used.
+- **Nothing is shared with the PC**: no clipboard, drive, printer, microphone or
+  smart card channel is offered.
+- Remoport's files (your PCs, trusted certificates, activity log) are readable only by
+  you, and the log never contains passwords.
 
 ## Build and run
 
@@ -40,12 +54,18 @@ remotos y las apps que publica tu organización, con un centro de conexiones cla
 favoritos, PCs y apps juntos, y espacios de trabajo que traen lo que tu organización
 te ofrece.
 
-> **Estado: vista previa.** Los escritorios remotos se abren dentro de Remoport con el
-> motor RDP de [RustConn](https://github.com/totoshko88/RustConn), de Anton Isaiev.
-> Esta primera fase cubre pantalla, teclado y ratón, y un escritorio que se ajusta al
-> tamaño de la ventana; falta probarla contra servidores reales. El portapapeles, el
-> sonido y las carpetas compartidas vienen después; mientras tanto, cualquier sesión
-> también se puede abrir en FreeRDP.
+> **Estado: vista previa.** Los escritorios remotos se abren dentro de Remoport con su
+> propio motor RDP, `remoport-rdp`, construido sobre IronRDP con partes de
+> [RustConn](https://github.com/totoshko88/RustConn), de Anton Isaiev. Pantalla, teclado
+> y ratón funcionan y el escritorio se ajusta al tamaño de la ventana; falta probarlo
+> contra servidores reales. El portapapeles, el sonido y las carpetas compartidas
+> vienen después.
+
+**Seguridad:** Remoport confirma la identidad del PC antes de usar tu contraseña (y te
+muestra la huella del certificado si no puede verificarlo), exige autenticación a nivel
+de red (NLA) salvo que lo permitas para un PC concreto, guarda contraseñas solo si lo
+pides y solo en el llavero del sistema, no comparte nada con el PC, y sus archivos
+solo los puedes leer tú.
 
 Remoport es software libre bajo la **GNU GPL, versión 3 o posterior**. El nombre y el
 logo de Remoport no están cubiertos por esa licencia: consulta

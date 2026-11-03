@@ -35,6 +35,7 @@ pub struct AddEditPcDialog {
     pub redirect_smartcards: bool,
     pub redirect_webauthn: bool,
     pub redirected_folders: Vec<RedirectedFolder>,
+    pub allow_without_nla: bool,
     pub new_folder_path: String,
     pub validation_error: Option<String>,
     /// The PC being edited, so Save keeps what the dialog does not show
@@ -65,6 +66,7 @@ impl Default for AddEditPcDialog {
             redirect_smartcards: false,
             redirect_webauthn: true,
             redirected_folders: Vec::new(),
+            allow_without_nla: false,
             new_folder_path: "".to_string(),
             validation_error: None,
             original: None,
@@ -108,6 +110,7 @@ impl AddEditPcDialog {
         self.redirect_smartcards = bookmark.redirect_smartcards;
         self.redirect_webauthn = bookmark.redirect_webauthn;
         self.redirected_folders = bookmark.redirected_folders.clone();
+        self.allow_without_nla = bookmark.allow_without_nla;
         self.original = Some(bookmark.clone());
         self.validation_error = None;
     }
@@ -193,6 +196,7 @@ impl AddEditPcDialog {
                                 bookmark.redirect_smartcards = self.redirect_smartcards;
                                 bookmark.redirect_webauthn = self.redirect_webauthn;
                                 bookmark.redirected_folders = self.redirected_folders.clone();
+                                bookmark.allow_without_nla = self.allow_without_nla;
 
                                 logging::event(format_args!(
                                     "{title}: saved \"{}\" ({}) in group \"{}\"",
@@ -259,6 +263,20 @@ impl AddEditPcDialog {
                 );
                 ui.end_row();
             });
+
+        ui.add_space(12.0);
+        ui.checkbox(
+            &mut self.allow_without_nla,
+            "Allow signing in without Network Level Authentication",
+        );
+        ui.label(
+            egui::RichText::new(
+                "Less secure: the PC shows its sign-in screen before checking who you are. \
+                 Turn on only for an old PC you trust that cannot use NLA.",
+            )
+            .size(11.5)
+            .weak(),
+        );
     }
 
     fn show_display_tab(&mut self, ui: &mut Ui) {

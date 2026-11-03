@@ -1,10 +1,11 @@
+use crate::credentials;
 use crate::dialogs::{AddEditPcDialog, AddWorkspaceDialog};
 use crate::fonts;
 use crate::icons::{self, Icon};
 use crate::logging;
 use crate::model::{
-    state_path, AppStateData, DeviceBookmark, NavTab, RemoteAppItem, ResolutionOption,
-    SortOption, ViewMode,
+    secure_config_dir, state_path, trust_store_path, AppStateData, DeviceBookmark, NavTab,
+    RemoteAppItem, ResolutionOption, SortOption, ViewMode,
 };
 use crate::session::ActiveSession;
 use crate::theme::{Appearance, Theme};
@@ -56,6 +57,9 @@ pub struct RemoportApp {
 impl RemoportApp {
     /// Starts with the state saved by the previous run.
     pub fn load() -> Self {
+        if let Err(err) = secure_config_dir() {
+            logging::event(format_args!("Could not make the configuration folder private: {err}"));
+        }
         let state = AppStateData::load();
         logging::event(format_args!(
             "Remoport {} started: {} PCs and {} apps, {:?} appearance, state in {}",
@@ -725,7 +729,7 @@ impl RemoportApp {
         if (entered || clicked) && !host.is_empty() {
             logging::event(format_args!("Quick connect to {host}"));
             let pc = DeviceBookmark::new(host.clone(), host, String::new());
-            self.active_session = Some(ActiveSession::new(pc));
+            self.active_session = Some(ActiveSession::new(pc, false));
         }
     }
 
@@ -985,7 +989,8 @@ impl RemoportApp {
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.label(format!(
-                    "\"{}\" ({}) will be removed from Remoport. The PC itself is not affected.",
+                    "\"{}\" ({}) will be removed from Remoport, with its password if it is \
+                     remembered in the keyring. The PC itself is not affected.",
                     pc.display_title(),
                     pc.pc_name
                 ));
@@ -1004,6 +1009,8 @@ impl RemoportApp {
             Some(true) => {
                 logging::event(format_args!("Deleted \"{}\" ({})", pc.display_title(), pc.pc_name));
                 self.state.bookmarks.retain(|b| b.id != pc.id);
+                // Its remembered password, if any, goes with it.
+                let _ = credentials::forget(pc.id);
                 self.pending_delete = None;
             }
             Some(false) => {
@@ -1087,7 +1094,7 @@ impl RemoportApp {
         if let Some(pos) = self.state.bookmarks.iter().position(|b| b.id == pc.id) {
             self.state.bookmarks[pos] = updated_pc.clone();
         }
-        self.active_session = Some(ActiveSession::new(updated_pc));
+        self.active_session = Some(ActiveSession::new(updated_pc, true));
     }
 
     // ── Apps ────────────────────────────────────────────────────────────
@@ -1219,11 +1226,10 @@ impl RemoportApp {
 
     fn open_app(&mut self, app: &RemoteAppItem) {
         logging::event(format_args!("Open app \"{}\" from \"{}\"", app.name, app.workspace_name));
-        let mut session = ActiveSession::new(DeviceBookmark::new(
-            app.workspace_name.clone(),
-            app.name.clone(),
-            String::new(),
-        ));
+        let mut session = ActiveSession::new(
+            DeviceBookmark::new(app.workspace_name.clone(), app.name.clone(), String::new()),
+            false,
+        );
         session.open_app = Some(app.name.clone());
         self.active_session = Some(session);
     }
@@ -1237,6 +1243,67 @@ impl RemoportApp {
                 .color(self.theme.text_primary),
         );
         ui.add_space(8.0);
+    }
+
+    /// How Remoport protects a connection, and the certificates the user trusted.
+    fn show_security_settings(&mut self, ui: &mut Ui) {
+        self.settings_heading(ui, "Security");
+        for line in [
+            "Before your password is used, Remoport confirms the PC's identity: a certificate \
+             from an authority this computer trusts, or one you checked and trusted yourself.",
+            "Network Level Authentication is required, unless you allow a PC to sign in without \
+             it in its settings.",
+            "Passwords are remembered only if you ask, and only in the system keyring.",
+        ] {
+            ui.label(RichText::new(line).color(self.theme.text_secondary));
+        }
+        ui.add_space(10.0);
+        let Some(store) = trust_store_path().map(remoport_rdp::TrustStore::new) else {
+            return;
+        };
+        let servers = store.entries();
+        if servers.is_empty() {
+            ui.label(
+                RichText::new("You have not trusted any PC's certificate yourself.")
+                    .color(self.theme.text_secondary),
+            );
+            return;
+        }
+        ui.label(RichText::new("Certificates you trusted").color(self.theme.text_primary));
+        ui.add_space(4.0);
+        let mut forget = None;
+        egui::Grid::new("trusted_servers")
+            .striped(true)
+            .spacing([16.0, 8.0])
+            .show(ui, |ui| {
+                for server in &servers {
+                    ui.label(RichText::new(&server.server).color(self.theme.text_primary));
+                    ui.label(
+                        RichText::new(server.sha256.get(..23).unwrap_or(&server.sha256))
+                            .monospace()
+                            .color(self.theme.text_secondary),
+                    )
+                    .on_hover_text(format!("{}\nSHA-256 {}", server.subject, server.sha256));
+                    ui.label(
+                        RichText::new(server.trusted_at.get(..10).unwrap_or(&server.trusted_at))
+                            .color(self.theme.text_secondary),
+                    );
+                    if ui
+                        .button("Forget")
+                        .on_hover_text("The next connection asks again")
+                        .clicked()
+                    {
+                        forget = Some(server.server.clone());
+                    }
+                    ui.end_row();
+                }
+            });
+        if let Some(server) = forget {
+            match store.forget(&server) {
+                Ok(()) => logging::event(format_args!("Stopped trusting the certificate of {server}")),
+                Err(err) => logging::event(format_args!("Could not forget {server}: {err}")),
+            }
+        }
     }
 
     fn show_settings(&mut self, ui: &mut Ui) {
@@ -1301,12 +1368,16 @@ impl RemoportApp {
         );
 
         ui.add_space(26.0);
+        self.show_security_settings(ui);
+
+        ui.add_space(26.0);
         self.settings_heading(ui, "About Remoport");
         for line in [
             format!("Remoport {}", env!("CARGO_PKG_VERSION")),
             "Your remote computers and apps, from Linux.".to_string(),
             "Free software under the GNU GPL, version 3 or later.".to_string(),
-            "Connections use the RDP engine of RustConn, by Anton Isaiev.".to_string(),
+            "Its RDP engine is built on IronRDP, with parts from RustConn by Anton Isaiev."
+                .to_string(),
         ] {
             ui.label(RichText::new(line).color(self.theme.text_secondary));
         }

@@ -92,6 +92,10 @@ pub struct DeviceBookmark {
     pub redirected_folders: Vec<RedirectedFolder>,
     pub is_favorite: bool,
     pub last_connected: Option<DateTime<Utc>>,
+    /// Lets this PC sign in on its own screen when it does not offer Network
+    /// Level Authentication. Off unless the user turns it on for this PC.
+    #[serde(default)]
+    pub allow_without_nla: bool,
 }
 
 impl DeviceBookmark {
@@ -121,6 +125,7 @@ impl DeviceBookmark {
             redirected_folders: Vec::new(),
             is_favorite: false,
             last_connected: None,
+            allow_without_nla: false,
         }
     }
 
@@ -193,17 +198,37 @@ impl Default for AppStateData {
     }
 }
 
-/// Where the state is kept: `$REMOPORT_CONFIG_DIR/state.json`, else
-/// `$XDG_CONFIG_HOME/remoport/state.json`, else `~/.config/remoport/state.json`.
-pub fn state_path() -> Option<PathBuf> {
-    let dir = match std::env::var_os("REMOPORT_CONFIG_DIR") {
+/// Remoport's configuration directory: `$REMOPORT_CONFIG_DIR`, else
+/// `$XDG_CONFIG_HOME/remoport`, else `~/.config/remoport`.
+pub fn config_dir() -> Option<PathBuf> {
+    Some(match std::env::var_os("REMOPORT_CONFIG_DIR") {
         Some(dir) => PathBuf::from(dir),
         None => match std::env::var_os("XDG_CONFIG_HOME") {
             Some(config) => PathBuf::from(config).join("remoport"),
             None => PathBuf::from(std::env::var_os("HOME")?).join(".config/remoport"),
         },
+    })
+}
+
+/// Where the state is kept, in [`config_dir`].
+pub fn state_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("state.json"))
+}
+
+/// Where the certificates the user trusted are kept, in [`config_dir`].
+pub fn trust_store_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("trusted_servers.json"))
+}
+
+/// Creates [`config_dir`] if needed and makes it private (0700): it holds the
+/// list of PCs and the certificates the user trusted.
+pub fn secure_config_dir() -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Some(dir) = config_dir() else {
+        return Ok(());
     };
-    Some(dir.join("state.json"))
+    std::fs::create_dir_all(&dir)?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
 }
 
 impl AppStateData {
@@ -244,13 +269,9 @@ impl AppStateData {
         }
     }
 
+    /// Readable only by the user (0600), replaced only once complete.
     fn save_to(path: &Path, json: &str) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let partial = path.with_extension("json.partial");
-        std::fs::write(&partial, json)?;
-        std::fs::rename(&partial, path)
+        remoport_rdp::write_private(path, json)
     }
 }
 
@@ -282,7 +303,12 @@ mod tests {
         let loaded = AppStateData::load_from(&path);
 
         assert_eq!(serde_json::to_string_pretty(&loaded).expect("serialize"), json);
-        assert!(!path.with_extension("json.partial").exists());
+        assert!(!path.with_extension("partial").exists());
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the state is private");
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

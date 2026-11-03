@@ -2,7 +2,7 @@
 //! (`remoport-rdp`): sign in, confirm the PC's identity when it cannot be
 //! verified automatically, show the remote screen, pass keyboard and mouse,
 //! follow the window's size, share the clipboard and play sound when this PC
-//! has them.
+//! has them, and bring a dropped connection back to the same session.
 
 use crate::credentials::{self, Outcome, Pending};
 use crate::keymap;
@@ -15,7 +15,8 @@ use egui::{
 };
 use remoport_rdp::{
     CertificateInfo, ClipboardText, Command, ConnectConfig, Error, Event as EngineEvent,
-    IdentityProblem, MouseButton, Rect as RemoteRect, Session, SoundOutput, TrustReply, TrustStore,
+    IdentityProblem, MouseButton, Rect as RemoteRect, ResumeCookie, Session, SoundOutput,
+    TrustReply, TrustStore,
 };
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
@@ -29,6 +30,13 @@ const MAX_SIDE: u16 = 8192;
 
 /// Limit for each step of the connection; the user's own decisions aside.
 const STEP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Attempts to bring a dropped connection back before giving up.
+const MAX_RECONNECTS: u32 = 20;
+
+/// Limit for each step of a reconnection: a network that is still down
+/// should cost the next attempt, not half a minute.
+const RECONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Engine events handled per repaint at most, so a burst cannot stall the UI.
 const EVENTS_PER_FRAME: usize = 2000;
@@ -48,6 +56,12 @@ enum Phase {
         replacement_confirmed: bool,
     },
     Connected,
+    /// The connection dropped and is being brought back: `at` is when this
+    /// attempt starts, `None` once it is under way.
+    Reconnecting {
+        attempt: u32,
+        at: Option<Instant>,
+    },
     /// The session is over; holds what to tell the user.
     Ended(String),
 }
@@ -150,6 +164,12 @@ pub struct ActiveSession {
     last_pointer: Option<(u16, u16)>,
     /// Text the PC copied, until it is taken (or not) on the next frame.
     remote_copy: Option<ClipboardText>,
+    /// The password this session signed in with, kept while the session
+    /// lasts so a dropped connection can sign in again, as Windows App does.
+    /// Wiped when the session ends or this view closes.
+    session_password: Option<Zeroizing<String>>,
+    /// The PC's latest cookie for resuming this session.
+    resume: Option<ResumeCookie>,
 }
 
 impl ActiveSession {
@@ -182,6 +202,8 @@ impl ActiveSession {
             modifiers: Modifiers::NONE,
             last_pointer: None,
             remote_copy: None,
+            session_password: None,
+            resume: None,
         }
     }
 
@@ -206,6 +228,17 @@ impl ActiveSession {
             return;
         }
 
+        if let Phase::Reconnecting {
+            attempt,
+            at: Some(at),
+        } = self.phase
+        {
+            if Instant::now() >= at {
+                self.phase = Phase::Reconnecting { attempt, at: None };
+                self.start(RECONNECT_TIMEOUT);
+            }
+        }
+
         match self.phase {
             Phase::SignIn => self.sign_in_form(ui, theme),
             Phase::Connecting => {
@@ -218,13 +251,18 @@ impl ActiveSession {
             }
             Phase::VerifyIdentity { .. } => self.identity_question(ui, theme),
             Phase::Connected => self.remote_screen(ui),
+            Phase::Reconnecting { attempt, .. } => self.reconnecting(ui, attempt),
             Phase::Ended(ref reason) => {
                 let reason = reason.clone();
                 self.ended(ui, theme, &reason);
             }
         }
 
-        if matches!(self.phase, Phase::Connecting | Phase::Connected) || self.keyring.is_some() {
+        if matches!(
+            self.phase,
+            Phase::Connecting | Phase::Connected | Phase::Reconnecting { .. }
+        ) || self.keyring.is_some()
+        {
             ui.ctx().request_repaint_after(Duration::from_millis(16));
         }
     }
@@ -285,6 +323,9 @@ impl ActiveSession {
                     .map(|g| format!(" · {g}"))
                     .unwrap_or_default();
                 format!("Connected{size}{graphics}")
+            }
+            Phase::Reconnecting { attempt, .. } => {
+                format!("Reconnecting… ({attempt} of {MAX_RECONNECTS})")
             }
             Phase::Ended(_) => "Disconnected".to_string(),
         }
@@ -413,19 +454,6 @@ impl ActiveSession {
     }
 
     fn connect(&mut self) {
-        let Some(trust_store) = model::trust_store_path().map(TrustStore::new) else {
-            self.phase = Phase::Ended(
-                "Remoport has no folder to keep trusted certificates in (HOME is not set)."
-                    .to_string(),
-            );
-            return;
-        };
-        let target = self.bookmark.pc_name.trim().to_string();
-        let (host, port) = split_host_port(&target);
-        let username = self.username.trim().to_string();
-        let (domain, user) = split_domain(&username);
-        let (width, height) = desktop_size(self.canvas_px);
-
         self.used_saved_password = self.password.is_empty() && self.saved_password.is_some();
         let password = if self.used_saved_password {
             self.saved_password.clone().unwrap_or_default()
@@ -434,13 +462,43 @@ impl ActiveSession {
         };
         self.to_remember = (self.saved && self.remember && !self.password.is_empty())
             .then(|| self.password.clone());
-        // The engine wipes its copy after the sign-in; this one goes now.
+        // Kept, wiped on drop, for reconnecting; the form's copy goes now.
+        self.session_password = Some(password);
         self.password.zeroize();
+        self.resume = None;
+        self.sign_in_error = None;
+        if self.start(STEP_TIMEOUT) {
+            self.phase = Phase::Connecting;
+        }
+    }
+
+    /// Starts the engine with the session's password, resuming the session
+    /// when the PC gave a cookie for it. Returns whether it started.
+    fn start(&mut self, timeout: Duration) -> bool {
+        let Some(trust_store) = model::trust_store_path().map(TrustStore::new) else {
+            self.forget_session();
+            self.phase = Phase::Ended(
+                "Remoport has no folder to keep trusted certificates in (HOME is not set)."
+                    .to_string(),
+            );
+            return false;
+        };
+        let target = self.bookmark.pc_name.trim().to_string();
+        let (host, port) = split_host_port(&target);
+        let username = self.username.trim().to_string();
+        let (domain, user) = split_domain(&username);
+        let (width, height) = desktop_size(self.canvas_px);
+        let password = self.session_password.clone().unwrap_or_default();
 
         let sound = (self.bookmark.audio_playback == AudioPlaybackMode::LocalDevice)
             .then(|| Box::new(crate::audio::Speaker::new()) as Box<dyn SoundOutput>);
         logging::event(format_args!(
-            "Connecting to {host}:{port} as {}{} at {width}×{height}{}{}{}{}",
+            "{} {host}:{port} as {}{} at {width}×{height}{}{}{}{}",
+            if self.resume.is_some() {
+                "Resuming the session on"
+            } else {
+                "Connecting to"
+            },
             if user.is_empty() {
                 "(no user name)"
             } else {
@@ -478,13 +536,19 @@ impl ActiveSession {
             height,
             allow_without_nla: self.bookmark.allow_without_nla,
             trust_store,
-            timeout: STEP_TIMEOUT,
+            timeout,
             client_name: client_name(),
             clipboard: self.bookmark.share_clipboard,
             sound,
+            resume: self.resume.clone(),
         }));
-        self.sign_in_error = None;
-        self.phase = Phase::Connecting;
+        true
+    }
+
+    /// Wipes what the session kept for reconnecting.
+    fn forget_session(&mut self) {
+        self.session_password = None;
+        self.resume = None;
     }
 
     // ── Engine events ───────────────────────────────────────────────────
@@ -536,7 +600,12 @@ impl ActiveSession {
             }
             EngineEvent::Connected { width, height } => {
                 logging::event(format_args!(
-                    "Connected to {} at {width}×{height}",
+                    "{} {} at {width}×{height}",
+                    if matches!(self.phase, Phase::Reconnecting { .. }) {
+                        "Reconnected to"
+                    } else {
+                        "Connected to"
+                    },
                     self.bookmark.pc_name
                 ));
                 self.screen = Some(Screen::new(width, height));
@@ -565,13 +634,54 @@ impl ActiveSession {
             }
             EngineEvent::PointerHidden(hidden) => self.remote_cursor_hidden = hidden,
             EngineEvent::Clipboard(text) => self.remote_copy = Some(text),
+            EngineEvent::ResumeCookie(cookie) => {
+                logging::event("The PC gave a cookie to resume this session after a drop");
+                self.resume = Some(cookie);
+            }
             EngineEvent::Ended(outcome) => self.session_ended(outcome),
         }
     }
 
     fn session_ended(&mut self, outcome: Option<Error>) {
         self.to_remember = None;
+        // Attempts made so far, when the session was up or coming back.
+        let attempts = match self.phase {
+            Phase::Connected => Some(0),
+            Phase::Reconnecting { attempt, .. } => Some(attempt),
+            _ => None,
+        };
         self.reset_session();
+        if let (Some(done), Some(error)) = (attempts, &outcome) {
+            if self.session_password.is_some() && worth_retrying(error, done > 0) {
+                if done < MAX_RECONNECTS {
+                    let attempt = done + 1;
+                    let wait = reconnect_delay(attempt);
+                    logging::event(format_args!(
+                        "{} ({error}); reconnecting in {} s, attempt {attempt} of {MAX_RECONNECTS}",
+                        if done == 0 {
+                            "Connection lost".to_string()
+                        } else {
+                            format!("Attempt {done} failed")
+                        },
+                        wait.as_secs()
+                    ));
+                    self.phase = Phase::Reconnecting {
+                        attempt,
+                        at: Some(Instant::now() + wait),
+                    };
+                    return;
+                }
+                logging::event("Gave up reconnecting");
+                self.forget_session();
+                self.phase = Phase::Ended(format!(
+                    "The connection to {} was lost and could not be brought back after \
+                     {MAX_RECONNECTS} attempts ({error}).",
+                    self.bookmark.pc_name
+                ));
+                return;
+            }
+        }
+        self.forget_session();
         match outcome {
             None => {
                 logging::event("Session ended");
@@ -976,6 +1086,37 @@ impl ActiveSession {
         }
     }
 
+    // ── Reconnecting ────────────────────────────────────────────────────
+
+    fn reconnecting(&mut self, ui: &mut Ui, attempt: u32) {
+        self.measure_canvas(ui);
+        ui.vertical_centered(|ui| {
+            ui.add_space(110.0);
+            ui.label(
+                RichText::new(format!("Reconnecting to {}…", self.bookmark.pc_name))
+                    .font(crate::fonts::medium(18.0)),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(format!(
+                    "The connection dropped. Attempt {attempt} of {MAX_RECONNECTS}: your \
+                     session on the PC normally stays open and comes back as you left it."
+                ))
+                .weak(),
+            );
+            ui.add_space(18.0);
+            if ui
+                .add_sized([180.0, 34.0], egui::Button::new("Stop reconnecting"))
+                .clicked()
+            {
+                logging::event("Stopped reconnecting");
+                self.reset_session();
+                self.forget_session();
+                self.phase = Phase::Ended("You stopped reconnecting.".to_string());
+            }
+        });
+    }
+
     // ── Messages ────────────────────────────────────────────────────────
 
     fn message(&self, ui: &mut Ui, title: &str, detail: &str) {
@@ -1029,6 +1170,27 @@ fn client_name() -> String {
     } else {
         name
     }
+}
+
+/// Whether a failure is the network's, so another attempt may bring the
+/// session back. Only a dropped link starts reconnecting; while
+/// reconnecting, a PC that cannot be reached yet is worth another try too.
+fn worth_retrying(error: &Error, reconnecting: bool) -> bool {
+    match error {
+        Error::ConnectionLost(_) => true,
+        Error::Unreachable(_) | Error::Timeout(_) | Error::Protocol(_) => reconnecting,
+        _ => false,
+    }
+}
+
+/// The wait before each attempt: quick at first, then every five seconds.
+fn reconnect_delay(attempt: u32) -> Duration {
+    Duration::from_secs(match attempt {
+        0 | 1 => 1,
+        2 => 2,
+        3 => 4,
+        _ => 5,
+    })
 }
 
 fn capitalize(text: &str) -> String {
@@ -1166,6 +1328,87 @@ mod tests {
         assert_eq!(remote_button(PointerButton::Primary), MouseButton::Left);
         assert_eq!(remote_button(PointerButton::Secondary), MouseButton::Right);
         assert_eq!(remote_button(PointerButton::Middle), MouseButton::Middle);
+    }
+
+    #[test]
+    fn only_network_failures_bring_the_session_back() {
+        let lost = Error::ConnectionLost("reset".into());
+        let unreachable = Error::Unreachable("no route".into());
+        assert!(worth_retrying(&lost, false));
+        // A PC unreachable at first is a plain failure, not a drop.
+        assert!(!worth_retrying(&unreachable, false));
+        assert!(worth_retrying(&unreachable, true));
+        assert!(worth_retrying(&Error::Timeout("reaching the PC"), true));
+        for refused in [
+            Error::Authentication("bad password".into()),
+            Error::IdentityRejected,
+            Error::NlaUnavailable,
+        ] {
+            assert!(!worth_retrying(&refused, true), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_dropped_session_comes_back_until_it_cannot() {
+        let pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
+        let mut view = ActiveSession::new(pc, false);
+        view.phase = Phase::Connected;
+        view.session_password = Some(Zeroizing::new("secret".into()));
+
+        view.session_ended(Some(Error::ConnectionLost("reset".into())));
+        assert!(matches!(
+            view.phase,
+            Phase::Reconnecting {
+                attempt: 1,
+                at: Some(_)
+            }
+        ));
+        for expected in 2..=MAX_RECONNECTS {
+            view.session_ended(Some(Error::Unreachable("no route".into())));
+            assert!(
+                matches!(view.phase, Phase::Reconnecting { attempt, .. } if attempt == expected)
+            );
+            assert!(view.session_password.is_some());
+        }
+        view.session_ended(Some(Error::Timeout("reaching the PC")));
+        assert!(
+            matches!(view.phase, Phase::Ended(ref why) if why.contains("could not be brought back"))
+        );
+        assert!(
+            view.session_password.is_none(),
+            "the password outlived the session"
+        );
+    }
+
+    #[test]
+    fn a_refused_password_while_reconnecting_asks_again_and_wipes_it() {
+        let pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
+        let mut view = ActiveSession::new(pc, false);
+        view.phase = Phase::Reconnecting {
+            attempt: 3,
+            at: None,
+        };
+        view.session_password = Some(Zeroizing::new("old".into()));
+        view.session_ended(Some(Error::Authentication("changed".into())));
+        assert!(matches!(view.phase, Phase::SignIn));
+        assert!(view.session_password.is_none());
+
+        // A session the PC ended itself is not brought back.
+        view.phase = Phase::Connected;
+        view.session_password = Some(Zeroizing::new("secret".into()));
+        view.session_ended(None);
+        assert!(matches!(view.phase, Phase::Ended(_)));
+        assert!(view.session_password.is_none());
+    }
+
+    #[test]
+    fn reconnecting_starts_quick_and_settles() {
+        let waits: Vec<u64> = (1..=6).map(|a| reconnect_delay(a).as_secs()).collect();
+        assert_eq!(waits, vec![1, 2, 4, 5, 5, 5]);
+        let total: u64 = (1..=MAX_RECONNECTS)
+            .map(|a| reconnect_delay(a).as_secs())
+            .sum();
+        assert!(total <= 120, "{total} s of waiting");
     }
 
     #[test]

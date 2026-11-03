@@ -21,7 +21,7 @@ use tokio::time::Instant;
 
 use crate::clipboard::Clipboard;
 use crate::connect::Established;
-use crate::{Command, Error, Event, MouseButton, Rect};
+use crate::{Command, Error, Event, MouseButton, Rect, ResumeCookie};
 
 /// The V key, pressed for a paste.
 const V: u8 = 0x2F;
@@ -207,6 +207,17 @@ where
             reactivate(activation, reader, writer, image, stage, events).await;
         }
         ActiveStageOutput::ServerRedirection(_) => return Err(Error::BrokerRedirect),
+        ActiveStageOutput::AutoReconnectCookie(cookie) => {
+            let _ = events.send(Event::ResumeCookie(ResumeCookie::new(
+                cookie.logon_id,
+                cookie.random_bits,
+            )));
+        }
+        ActiveStageOutput::AutoReconnectFailed => {
+            let _ = events.send(Event::Progress(
+                "The PC did not resume the earlier session; it signed in anew".to_string(),
+            ));
+        }
         _ => {}
     }
     Ok(false)

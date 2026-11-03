@@ -10,8 +10,9 @@ side by side, and workspaces that bring in what your organization offers.
 > RDP engine, [`remoport-rdp`](remoport-rdp), built on IronRDP with parts from
 > [RustConn](https://github.com/totoshko88/RustConn) by Anton Isaiev. Screen, keyboard
 > and mouse work, the desktop follows the window's size, and the PC's sound and a
-> shared text clipboard can be turned on per PC; this still awaits testing against
-> real servers. Microphone, shared folders and reconnection come next.
+> shared text clipboard can be turned on per PC, and a dropped connection comes back
+> to the same session; this still awaits testing against real servers. Microphone
+> and shared folders come next.
 
 ## Security
 
@@ -22,7 +23,8 @@ side by side, and workspaces that bring in what your organization offers.
 - **Network Level Authentication is required**, unless you allow a specific PC to
   sign in without it. The original RDP security is never used.
 - **Passwords are remembered only if you ask, and only in the system keyring**
-  (KWallet or GNOME Keyring). In memory they are wiped once used.
+  (KWallet or GNOME Keyring). While a session lasts its password stays in memory,
+  so a dropped connection can sign in again; it is wiped when the session ends.
 - **Nothing is shared with a PC unless you turn it on for that PC.** The clipboard,
   when shared, carries text only: the PC gets just the text you paste into the
   session, and what you copy there reaches this computer only while you are using
@@ -62,14 +64,15 @@ te ofrece.
 > propio motor RDP, `remoport-rdp`, construido sobre IronRDP con partes de
 > [RustConn](https://github.com/totoshko88/RustConn), de Anton Isaiev. Pantalla, teclado
 > y ratón funcionan, el escritorio se ajusta al tamaño de la ventana, y el sonido del
-> PC y un portapapeles de texto compartido se activan por PC; falta probarlo contra
-> servidores reales. El micrófono, las carpetas compartidas y la reconexión vienen
-> después.
+> PC y un portapapeles de texto compartido se activan por PC, y una conexión caída
+> vuelve a la misma sesión; falta probarlo contra servidores reales. El micrófono y
+> las carpetas compartidas vienen después.
 
 **Seguridad:** Remoport confirma la identidad del PC antes de usar tu contraseña (y te
 muestra la huella del certificado si no puede verificarlo), exige autenticación a nivel
 de red (NLA) salvo que lo permitas para un PC concreto, guarda contraseñas solo si lo
-pides y solo en el llavero del sistema, no comparte nada con un PC salvo lo que actives
+pides y solo en el llavero del sistema (mientras dura una sesión la contraseña queda en
+memoria para reconectar, y se borra al terminar), no comparte nada con un PC salvo lo que actives
 para ese PC (el portapapeles solo lleva texto: el PC recibe únicamente lo que pegas en
 la sesión), y sus archivos solo los puedes leer tú.
 

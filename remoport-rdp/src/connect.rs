@@ -19,6 +19,7 @@ use ironrdp_pdu::rdp::capability_sets::{
     BitmapCodecs, MajorPlatformType, client_codecs_capabilities,
 };
 use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
+use ironrdp_pdu::rdp::session_info::ServerAutoReconnect;
 use ironrdp_tokio::TokioFramed;
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
 use tokio::net::TcpStream;
@@ -27,7 +28,9 @@ use tokio::time::timeout;
 use crate::clipboard::{self, Clipboard};
 use crate::error::{is_authentication_failure, is_nla_refusal};
 use crate::identity::{self, Verdict};
-use crate::{ConnectConfig, Error, Event, TrustReply, gfx, keyboard_layout, net, sound};
+use crate::{
+    ConnectConfig, Error, Event, ResumeCookie, TrustReply, gfx, keyboard_layout, net, sound,
+};
 
 /// How long the user has to decide about a PC's identity.
 const IDENTITY_DECISION: Duration = Duration::from_secs(300);
@@ -78,8 +81,13 @@ pub(crate) async fn connect(
     progress(format!("Keyboard layout: {layout_source}"));
     let sound = config.sound.take();
     let playing = sound.is_some();
-    let mut connector =
-        ClientConnector::new(connector_config(config, layout, playing), client_addr);
+    let mut connector = with_resume(
+        ClientConnector::new(connector_config(config, layout, playing), client_addr),
+        config.resume.as_ref(),
+    );
+    if let Some(cookie) = &config.resume {
+        progress(format!("Resuming session {} of this PC", cookie.logon_id));
+    }
     let clipboard = config.clipboard.then(|| {
         let (channel, clipboard) = clipboard::channel();
         connector.static_channels.insert(channel);
@@ -318,10 +326,70 @@ fn connector_config(config: &ConnectConfig, keyboard_layout: u32, sound: bool) -
     }
 }
 
+/// Presents the cookie of the session a reconnection resumes; without one the
+/// PC signs in as usual, and so it does when it no longer takes the cookie.
+fn with_resume(connector: ClientConnector, resume: Option<&ResumeCookie>) -> ClientConnector {
+    let Some(cookie) = resume else {
+        return connector;
+    };
+    // ponytail: IronRDP keeps the cookie as a plain copy that cannot be wiped
+    // (its `Debug` does hide the bits); closing this needs a zeroizing field
+    // in ironrdp-pdu upstream.
+    connector.with_auto_reconnect_cookie(ServerAutoReconnect {
+        logon_id: cookie.logon_id,
+        random_bits: *cookie.random_bits,
+    })
+}
+
 fn timezone_info() -> TimezoneInfo {
     let offset = chrono::Local::now().offset().local_minus_utc();
     TimezoneInfo {
         bias: -(offset / 60),
         ..TimezoneInfo::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> ConnectConfig {
+        ConnectConfig {
+            host: "pc.example".to_string(),
+            port: 3389,
+            username: "jdoe".to_string(),
+            domain: None,
+            password: zeroize::Zeroizing::new(String::new()),
+            width: 1280,
+            height: 720,
+            allow_without_nla: false,
+            trust_store: crate::TrustStore::new(std::env::temp_dir().join("unused.json")),
+            timeout: Duration::from_secs(1),
+            client_name: "test".to_string(),
+            clipboard: false,
+            sound: None,
+            resume: None,
+        }
+    }
+
+    #[test]
+    fn only_a_reconnection_presents_the_cookie_and_never_prints_it() {
+        let fresh = || {
+            ClientConnector::new(
+                connector_config(&config(), 0x409, false),
+                std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            )
+        };
+        assert!(with_resume(fresh(), None).auto_reconnect_cookie.is_none());
+
+        let cookie = ResumeCookie::new(7, [0xA5; 16]);
+        let connector = with_resume(fresh(), Some(&cookie));
+        let presented = connector.auto_reconnect_cookie.as_ref().expect("presented");
+        assert_eq!((presented.logon_id, presented.random_bits), (7, [0xA5; 16]));
+        // 0xA5 is 165: the bits appear in neither Debug.
+        for debug in [format!("{cookie:?}"), format!("{presented:?}")] {
+            assert!(!debug.contains("165"), "random bits printed: {debug}");
+        }
+        assert!(format!("{cookie:?}").contains("logon_id: 7"));
     }
 }

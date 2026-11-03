@@ -14,6 +14,8 @@
 //!   [`clipboard`](crate::clipboard).
 //! - The PC's sound can be played here, as uncompressed PCM only. No drive,
 //!   printer, smart card, microphone or camera is offered.
+//! - A dropped connection can resume the same session: the PC's cookie for it
+//!   ([`ResumeCookie`]) is wiped when dropped, never printed and never saved.
 //!
 //! Parts follow RustConn's client (`rustconn-core`, by Anton Isaiev,
 //! GPL-3.0-or-later), as noted in each module.
@@ -62,6 +64,37 @@ pub struct ConnectConfig {
     pub clipboard: bool,
     /// Plays this PC's sound here; `None` leaves it silent.
     pub sound: Option<Box<dyn SoundOutput>>,
+    /// Resumes the session this cookie came from, after a dropped connection.
+    pub resume: Option<ResumeCookie>,
+}
+
+/// The PC's cookie for a session ([MS-RDPBCGR] 2.2.4.2): presented when
+/// reconnecting, it proves this computer was the one attached, and the PC
+/// resumes that session instead of signing in anew. It is credential
+/// material: wiped when dropped, never printed, never saved.
+///
+/// [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/
+#[derive(Clone)]
+pub struct ResumeCookie {
+    logon_id: u32,
+    random_bits: Zeroizing<[u8; 16]>,
+}
+
+impl ResumeCookie {
+    pub(crate) fn new(logon_id: u32, random_bits: [u8; 16]) -> Self {
+        Self {
+            logon_id,
+            random_bits: Zeroizing::new(random_bits),
+        }
+    }
+}
+
+impl std::fmt::Debug for ResumeCookie {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResumeCookie")
+            .field("logon_id", &self.logon_id)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Clipboard text: wiped from memory when dropped, and never printed.
@@ -152,6 +185,9 @@ pub enum Event {
     PointerHidden(bool),
     /// The PC copied this text. It is the app's to take or leave.
     Clipboard(ClipboardText),
+    /// The PC issued (or renewed, hourly) the cookie that resumes this
+    /// session after a dropped connection; keep the latest.
+    ResumeCookie(ResumeCookie),
     /// The session is over: `None` when it ended normally.
     Ended(Option<Error>),
 }

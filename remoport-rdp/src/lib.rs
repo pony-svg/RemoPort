@@ -34,6 +34,7 @@ mod error;
 mod gateway;
 mod gfx;
 mod identity;
+mod kerberos;
 mod keyboard_layout;
 mod microphone;
 mod net;
@@ -44,6 +45,7 @@ pub use error::Error;
 pub use identity::{
     CertificateInfo, IdentityProblem, TrustStore, TrustedServer, fingerprint, write_private,
 };
+pub use kerberos::{KdcAddressError, normalize_kdc_address};
 pub use microphone::{MicrophonePackets, SoundInput};
 pub use sound::SoundOutput;
 
@@ -83,6 +85,8 @@ pub struct ConnectConfig {
     /// The RD Gateway to reach this PC through, as `host` or `host:port`;
     /// it signs in with the PC's credentials.
     pub gateway: Option<String>,
+    /// Signs in with Kerberos rather than NTLM.
+    pub kerberos: Option<Kerberos>,
     /// Resumes the session this cookie came from, after a dropped connection.
     pub resume: Option<ResumeCookie>,
 }
@@ -114,6 +118,14 @@ impl std::fmt::Debug for ResumeCookie {
             .field("logon_id", &self.logon_id)
             .finish_non_exhaustive()
     }
+}
+
+/// Kerberos sign-in for a PC. See [`kerberos`](crate::kerberos).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Kerberos {
+    /// The KDC to ask (see [`normalize_kdc_address`]); `None` finds it from
+    /// the environment, `krb5.conf` or the realm's DNS name.
+    pub kdc: Option<String>,
 }
 
 /// A local folder the PC sees as a drive under `\\tsclient`.

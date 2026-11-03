@@ -605,6 +605,9 @@ impl ActiveSession {
             microphone,
             folders,
             gateway: Some(self.bookmark.gateway.trim().to_string()).filter(|g| !g.is_empty()),
+            kerberos: self.bookmark.kerberos.then(|| remoport_rdp::Kerberos {
+                kdc: Some(self.bookmark.kdc.trim().to_string()).filter(|k| !k.is_empty()),
+            }),
             resume: self.resume.clone(),
         }));
         true

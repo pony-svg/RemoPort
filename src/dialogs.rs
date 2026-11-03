@@ -37,6 +37,8 @@ pub struct AddEditPcDialog {
     pub redirected_folders: Vec<RedirectedFolder>,
     pub allow_without_nla: bool,
     pub gateway: String,
+    pub kerberos: bool,
+    pub kdc: String,
     pub new_folder_path: String,
     /// Why the folder typed could not be added.
     pub folder_error: Option<String>,
@@ -71,6 +73,8 @@ impl Default for AddEditPcDialog {
             redirected_folders: Vec::new(),
             allow_without_nla: false,
             gateway: String::new(),
+            kerberos: false,
+            kdc: String::new(),
             new_folder_path: "".to_string(),
             folder_error: None,
             validation_error: None,
@@ -117,6 +121,8 @@ impl AddEditPcDialog {
         self.redirected_folders = bookmark.redirected_folders.clone();
         self.allow_without_nla = bookmark.allow_without_nla;
         self.gateway = bookmark.gateway.clone();
+        self.kerberos = bookmark.kerberos;
+        self.kdc = bookmark.kdc.clone();
         self.original = Some(bookmark.clone());
         self.validation_error = None;
         self.folder_error = None;
@@ -175,11 +181,15 @@ impl AddEditPcDialog {
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.add(theme.primary_button("Save")).clicked() {
+                            let kdc_error = remoport_rdp::normalize_kdc_address(&self.kdc).err();
                             if self.pc_name.trim().is_empty() {
                                 self.validation_error = Some("PC name cannot be empty".to_string());
                                 logging::event(format_args!(
                                     "{title}: Save refused, the PC name is empty"
                                 ));
+                            } else if let (true, Some(error)) = (self.kerberos, kdc_error) {
+                                logging::event(format_args!("{title}: Save refused, {error}"));
+                                self.validation_error = Some(capitalize_first(&error.to_string()));
                             } else {
                                 let fresh = DeviceBookmark::new(
                                     self.pc_name.trim().to_string(),
@@ -211,6 +221,8 @@ impl AddEditPcDialog {
                                 bookmark.redirected_folders = self.redirected_folders.clone();
                                 bookmark.allow_without_nla = self.allow_without_nla;
                                 bookmark.gateway = self.gateway.trim().to_string();
+                                bookmark.kerberos = self.kerberos;
+                                bookmark.kdc = self.kdc.trim().to_string();
 
                                 logging::event(format_args!(
                                     "{title}: saved \"{}\" ({}) in group \"{}\"",
@@ -297,6 +309,27 @@ impl AddEditPcDialog {
         }
 
         ui.add_space(12.0);
+        ui.checkbox(&mut self.kerberos, "Sign in with Kerberos");
+        if self.kerberos {
+            ui.horizontal(|ui| {
+                ui.label("KDC:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.kdc)
+                        .hint_text("Optional, e.g. dc01.example.com")
+                        .desired_width(280.0),
+                );
+            });
+            ui.label(
+                egui::RichText::new(
+                    "For accounts that may not use NTLM. Name the PC by its DNS name and sign in \
+                     as user@example.com. Without a KDC, Remoport looks in krb5.conf, then asks \
+                     the domain itself.",
+                )
+                .size(11.5)
+                .weak(),
+            );
+        }
+        ui.add_space(8.0);
         ui.checkbox(
             &mut self.allow_without_nla,
             "Allow signing in without Network Level Authentication",
@@ -599,4 +632,12 @@ fn expand_home(path: &str) -> String {
         (Some(rest), Ok(home)) => format!("{}/{rest}", home.trim_end_matches('/')),
         _ => path.to_string(),
     }
+}
+
+fn capitalize_first(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }

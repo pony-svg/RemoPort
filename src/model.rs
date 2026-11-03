@@ -106,6 +106,12 @@ pub struct DeviceBookmark {
     /// empty to connect directly.
     #[serde(default)]
     pub gateway: String,
+    /// Signs in with Kerberos rather than NTLM.
+    #[serde(default)]
+    pub kerberos: bool,
+    /// The KDC for Kerberos; empty to find it.
+    #[serde(default)]
+    pub kdc: String,
 }
 
 impl DeviceBookmark {
@@ -137,6 +143,8 @@ impl DeviceBookmark {
             last_connected: None,
             allow_without_nla: false,
             gateway: String::new(),
+            kerberos: false,
+            kdc: String::new(),
         }
     }
 

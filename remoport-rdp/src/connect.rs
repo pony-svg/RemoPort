@@ -29,8 +29,8 @@ use crate::clipboard::{self, Clipboard};
 use crate::error::{is_authentication_failure, is_nla_refusal};
 use crate::identity::{self, Verdict};
 use crate::{
-    ConnectConfig, Error, Event, ResumeCookie, TrustReply, drive, gfx, keyboard_layout, microphone,
-    net, sound,
+    ConnectConfig, Error, Event, ResumeCookie, TrustReply, drive, gfx, kerberos, keyboard_layout,
+    microphone, net, sound,
 };
 
 /// Microphone packets waiting for the session; beyond this, sound is dropped
@@ -218,7 +218,25 @@ pub(crate) async fn connect(
     check_identity(config, &certificate, events).await?;
 
     // 5. Sign in with CredSSP and finish the handshake.
-    progress("Signing in (Network Level Authentication)".to_string());
+    let kerberos = config.kerberos.as_ref().and_then(|settings| {
+        for note in kerberos::preflight(config) {
+            progress(note);
+        }
+        kerberos::settings(config, settings.kdc.as_deref())
+    });
+    progress(format!(
+        "Signing in (Network Level Authentication, {})",
+        match &kerberos {
+            Some(settings) => format!(
+                "Kerberos, KDC {}",
+                settings
+                    .kdc_proxy_url
+                    .as_ref()
+                    .map_or_else(|| "from krb5.conf".to_string(), ToString::to_string)
+            ),
+            None => "NTLM".to_string(),
+        }
+    ));
     let server_public_key = ironrdp_tls::extract_tls_server_public_key(&certificate)
         .map(<[u8]>::to_vec)
         .unwrap_or_default();
@@ -234,7 +252,7 @@ pub(crate) async fn connect(
         &mut network,
         ServerName::new(&config.host),
         server_public_key,
-        None,
+        kerberos,
     ));
     let outcome = timeout(config.timeout, futures::FutureExt::catch_unwind(finalize))
         .await
@@ -442,6 +460,7 @@ mod tests {
             microphone: None,
             folders: Vec::new(),
             gateway: None,
+            kerberos: None,
             resume: None,
         }
     }

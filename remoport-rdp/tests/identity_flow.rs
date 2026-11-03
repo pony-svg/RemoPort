@@ -84,6 +84,7 @@ fn config(port: u16, store: &TrustStore) -> ConnectConfig {
         microphone: None,
         folders: Vec::new(),
         gateway: None,
+        kerberos: None,
         resume: None,
     }
 }

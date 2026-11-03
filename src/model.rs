@@ -85,7 +85,10 @@ pub struct DeviceBookmark {
     pub audio_playback: AudioPlaybackMode,
     pub redirect_microphones: bool,
     pub redirect_cameras: bool,
-    pub redirect_clipboard: bool,
+    /// Shares the clipboard's text with this PC. Off until the user turns it
+    /// on; files saved before Remoport had a clipboard come back with it off.
+    #[serde(default)]
+    pub share_clipboard: bool,
     pub redirect_printers: bool,
     pub redirect_smartcards: bool,
     pub redirect_webauthn: bool,
@@ -118,10 +121,10 @@ impl DeviceBookmark {
             audio_playback: AudioPlaybackMode::LocalDevice,
             redirect_microphones: false,
             redirect_cameras: false,
-            redirect_clipboard: true,
+            share_clipboard: false,
             redirect_printers: false,
             redirect_smartcards: false,
-            redirect_webauthn: true,
+            redirect_webauthn: false,
             redirected_folders: Vec::new(),
             is_favorite: false,
             last_connected: None,
@@ -283,6 +286,20 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("remoport-test-{name}-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir
+    }
+
+    #[test]
+    fn nothing_is_shared_with_a_pc_unless_the_user_turns_it_on() {
+        let pc = DeviceBookmark::new("pc".into(), String::new(), String::new());
+        assert!(!pc.share_clipboard && !pc.redirect_microphones && !pc.redirect_webauthn);
+        // A PC saved before the clipboard existed had it ticked by default:
+        // it comes back off.
+        let mut old = serde_json::to_value(&pc).expect("serialize");
+        let fields = old.as_object_mut().expect("object");
+        fields.remove("share_clipboard");
+        fields.insert("redirect_clipboard".into(), true.into());
+        let loaded: DeviceBookmark = serde_json::from_value(old).expect("deserialize");
+        assert!(!loaded.share_clipboard);
     }
 
     #[test]

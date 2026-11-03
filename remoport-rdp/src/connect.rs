@@ -24,9 +24,10 @@ use ironrdp_tokio::reqwest::ReqwestNetworkClient;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+use crate::clipboard::{self, Clipboard};
 use crate::error::{is_authentication_failure, is_nla_refusal};
 use crate::identity::{self, Verdict};
-use crate::{ConnectConfig, Error, Event, TrustReply, gfx, keyboard_layout, net};
+use crate::{ConnectConfig, Error, Event, TrustReply, gfx, keyboard_layout, net, sound};
 
 /// How long the user has to decide about a PC's identity.
 const IDENTITY_DECISION: Duration = Duration::from_secs(300);
@@ -37,10 +38,12 @@ pub(crate) type Framed = TokioFramed<ironrdp_tls::TlsStream<TcpStream>>;
 pub(crate) struct Established {
     pub framed: Framed,
     pub result: ConnectionResult,
+    /// The session's side of the clipboard, when it is shared.
+    pub clipboard: Option<Clipboard>,
 }
 
 pub(crate) async fn connect(
-    config: &ConnectConfig,
+    config: &mut ConnectConfig,
     events: &mpsc::Sender<Event>,
 ) -> Result<Established, Error> {
     let progress = |message: String| {
@@ -69,11 +72,41 @@ pub(crate) async fn connect(
             .map_or_else(|_| "?".to_string(), |a| a.to_string())
     ));
 
-    // 2. The connector and its channels: display control (resizing) and the
-    // graphics pipeline. Clipboard, sound and devices are not offered.
+    // 2. The connector and its channels: display control (resizing), the
+    // graphics pipeline, and the clipboard and sound when this PC has them.
     let (layout, layout_source) = keyboard_layout::detect_keyboard_layout();
     progress(format!("Keyboard layout: {layout_source}"));
-    let mut connector = ClientConnector::new(connector_config(config, layout), client_addr);
+    let sound = config.sound.take();
+    let playing = sound.is_some();
+    let mut connector =
+        ClientConnector::new(connector_config(config, layout, playing), client_addr);
+    let clipboard = config.clipboard.then(|| {
+        let (channel, clipboard) = clipboard::channel();
+        connector.static_channels.insert(channel);
+        clipboard
+    });
+    if let Some(output) = sound {
+        connector
+            .static_channels
+            .insert(ironrdp_rdpsnd::client::Rdpsnd::new(Box::new(
+                sound::Handler::new(output),
+            )));
+        // Windows sends sound only alongside the device channel; this one
+        // announces no device.
+        connector.static_channels.insert(ironrdp_rdpdr::Rdpdr::new(
+            Box::new(ironrdp_rdpdr::NoopRdpdrBackend),
+            config.client_name.clone(),
+        ));
+    }
+    progress(format!(
+        "Clipboard {}, sound {}",
+        if clipboard.is_some() {
+            "shared (text)"
+        } else {
+            "not shared"
+        },
+        if playing { "played here" } else { "off" },
+    ));
     let ready = events.clone();
     let display_control = ironrdp_displaycontrol::client::DisplayControlClient::new(move |_caps| {
         let _ = ready.send(Event::DisplayControlReady);
@@ -134,7 +167,11 @@ pub(crate) async fn connect(
         .await
         .map_err(|_| Error::Timeout("signing in"))?;
     match outcome {
-        Ok(Ok(ConnectionOutcome::Connected(result))) => Ok(Established { framed, result }),
+        Ok(Ok(ConnectionOutcome::Connected(result))) => Ok(Established {
+            framed,
+            result,
+            clipboard,
+        }),
         Ok(Ok(ConnectionOutcome::Redirected(_))) => Err(Error::BrokerRedirect),
         Ok(Err(e)) => {
             let detail = format!("{e} [{:?}]", e.kind());
@@ -219,7 +256,7 @@ fn negotiation_error(error: &ConnectorError, allow_without_nla: bool) -> Error {
 ///
 /// SECURITY: `Credentials`, `Config` and the connector derive `Debug` without
 /// redacting the password: never format them.
-fn connector_config(config: &ConnectConfig, keyboard_layout: u32) -> Config {
+fn connector_config(config: &ConnectConfig, keyboard_layout: u32, sound: bool) -> Config {
     let credentials = Credentials::UsernamePassword {
         username: config.username.clone(),
         // IronRDP needs an owned String; that copy is IronRDP's to keep.
@@ -268,7 +305,7 @@ fn connector_config(config: &ConnectConfig, keyboard_layout: u32) -> Config {
         hardware_id: None,
         request_data: None,
         autologon,
-        enable_audio_playback: false,
+        enable_audio_playback: sound,
         enable_audio_capture: false,
         performance_flags: PerformanceFlags::default(),
         license_cache: None,

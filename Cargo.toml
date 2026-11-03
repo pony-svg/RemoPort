@@ -21,3 +21,5 @@ remoport-rdp = { path = "remoport-rdp" }
 # Remembered passwords live only in the system keyring (Secret Service), and
 # travel to it over an encrypted D-Bus session.
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+# The PC's sound on this computer's speakers.
+cpal = "0.18"

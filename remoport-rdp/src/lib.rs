@@ -9,11 +9,16 @@
 //!   allowed to sign in without it; the original RDP security is never used.
 //! - The password lives in zeroizing memory on Remoport's side; IronRDP's
 //!   credential types print it in `Debug`, so they are never formatted.
-//! - No clipboard, sound, device or drive channel is offered.
+//! - The clipboard is shared, as text, only with the PCs the user allows it:
+//!   the PC gets only what the user pastes into it. See
+//!   [`clipboard`](crate::clipboard).
+//! - The PC's sound can be played here, as uncompressed PCM only. No drive,
+//!   printer, smart card, microphone or camera is offered.
 //!
 //! Parts follow RustConn's client (`rustconn-core`, by Anton Isaiev,
 //! GPL-3.0-or-later), as noted in each module.
 
+mod clipboard;
 mod connect;
 mod error;
 mod gfx;
@@ -21,11 +26,13 @@ mod identity;
 mod keyboard_layout;
 mod net;
 mod session;
+mod sound;
 
 pub use error::Error;
 pub use identity::{
     CertificateInfo, IdentityProblem, TrustStore, TrustedServer, fingerprint, write_private,
 };
+pub use sound::SoundOutput;
 
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -51,6 +58,32 @@ pub struct ConnectConfig {
     pub timeout: Duration,
     /// The name this computer gives the PC.
     pub client_name: String,
+    /// Shares the clipboard's text with this PC, both ways.
+    pub clipboard: bool,
+    /// Plays this PC's sound here; `None` leaves it silent.
+    pub sound: Option<Box<dyn SoundOutput>>,
+}
+
+/// Clipboard text: wiped from memory when dropped, and never printed.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ClipboardText(Zeroizing<String>);
+
+impl ClipboardText {
+    #[must_use]
+    pub fn new(text: String) -> Self {
+        Self(Zeroizing::new(text))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ClipboardText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ClipboardText({} characters)", self.0.chars().count())
+    }
 }
 
 /// A rectangle of the remote desktop, in pixels.
@@ -117,12 +150,14 @@ pub enum Event {
     /// The desktop can now follow the window's size.
     DisplayControlReady,
     PointerHidden(bool),
+    /// The PC copied this text. It is the app's to take or leave.
+    Clipboard(ClipboardText),
     /// The session is over: `None` when it ended normally.
     Ended(Option<Error>),
 }
 
 /// What the user does in the session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Key {
         scancode: u8,
@@ -148,6 +183,9 @@ pub enum Command {
         height: u16,
     },
     CtrlAltDel,
+    /// The user pasted this text: the PC gets it, when the clipboard is
+    /// shared with it, and then the V of Ctrl+V. Ctrl itself is sent as a key.
+    Paste(ClipboardText),
 }
 
 /// A connection running on its own thread.
@@ -214,13 +252,13 @@ impl Drop for Session {
 }
 
 async fn run(
-    config: ConnectConfig,
+    mut config: ConnectConfig,
     events: &mpsc::Sender<Event>,
     commands: tokio::sync::mpsc::UnboundedReceiver<Command>,
     mut cancelled: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Error> {
     let established = tokio::select! {
-        result = connect::connect(&config, events) => result?,
+        result = connect::connect(&mut config, events) => result?,
         _ = cancelled.changed() => return Ok(()),
     };
     // The password is not needed past the sign-in: wipe Remoport's copy now.

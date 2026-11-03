@@ -1,20 +1,21 @@
 //! A remote desktop session, drawn inside Remoport by its own RDP engine
 //! (`remoport-rdp`): sign in, confirm the PC's identity when it cannot be
 //! verified automatically, show the remote screen, pass keyboard and mouse,
-//! follow the window's size.
+//! follow the window's size, share the clipboard and play sound when this PC
+//! has them.
 
 use crate::credentials::{self, Outcome, Pending};
 use crate::keymap;
 use crate::logging;
-use crate::model::{self, DeviceBookmark};
+use crate::model::{self, AudioPlaybackMode, DeviceBookmark};
 use crate::theme::Theme;
 use egui::{
     pos2, vec2, Align2, Color32, ColorImage, Context, Event, FontId, Modifiers, PointerButton,
     Rect, RichText, Rounding, Sense, TextureHandle, TextureOptions, Ui,
 };
 use remoport_rdp::{
-    CertificateInfo, Command, ConnectConfig, Error, Event as EngineEvent, IdentityProblem,
-    MouseButton, Rect as RemoteRect, Session, TrustReply, TrustStore,
+    CertificateInfo, ClipboardText, Command, ConnectConfig, Error, Event as EngineEvent,
+    IdentityProblem, MouseButton, Rect as RemoteRect, Session, SoundOutput, TrustReply, TrustStore,
 };
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
@@ -147,6 +148,8 @@ pub struct ActiveSession {
     /// Modifier keys held on the remote side.
     modifiers: Modifiers,
     last_pointer: Option<(u16, u16)>,
+    /// Text the PC copied, until it is taken (or not) on the next frame.
+    remote_copy: Option<ClipboardText>,
 }
 
 impl ActiveSession {
@@ -178,6 +181,7 @@ impl ActiveSession {
             remote_cursor_hidden: false,
             modifiers: Modifiers::NONE,
             last_pointer: None,
+            remote_copy: None,
         }
     }
 
@@ -433,8 +437,10 @@ impl ActiveSession {
         // The engine wipes its copy after the sign-in; this one goes now.
         self.password.zeroize();
 
+        let sound = (self.bookmark.audio_playback == AudioPlaybackMode::LocalDevice)
+            .then(|| Box::new(crate::audio::Speaker::new()) as Box<dyn SoundOutput>);
         logging::event(format_args!(
-            "Connecting to {host}:{port} as {}{} at {width}×{height}{}{}",
+            "Connecting to {host}:{port} as {}{} at {width}×{height}{}{}{}{}",
             if user.is_empty() {
                 "(no user name)"
             } else {
@@ -451,6 +457,16 @@ impl ActiveSession {
             } else {
                 ""
             },
+            if self.bookmark.share_clipboard {
+                ", clipboard shared"
+            } else {
+                ""
+            },
+            if sound.is_some() {
+                ", sound here"
+            } else {
+                ", no sound"
+            },
         ));
         self.session = Some(Session::start(ConnectConfig {
             host: host.to_string(),
@@ -464,6 +480,8 @@ impl ActiveSession {
             trust_store,
             timeout: STEP_TIMEOUT,
             client_name: client_name(),
+            clipboard: self.bookmark.share_clipboard,
+            sound,
         }));
         self.sign_in_error = None;
         self.phase = Phase::Connecting;
@@ -546,6 +564,7 @@ impl ActiveSession {
                 self.display_control = true;
             }
             EngineEvent::PointerHidden(hidden) => self.remote_cursor_hidden = hidden,
+            EngineEvent::Clipboard(text) => self.remote_copy = Some(text),
             EngineEvent::Ended(outcome) => self.session_ended(outcome),
         }
     }
@@ -606,6 +625,7 @@ impl ActiveSession {
         self.pending_size = None;
         self.requested_size = None;
         self.modifiers = Modifiers::NONE;
+        self.remote_copy = None;
     }
 
     fn send(&self, command: Command) {
@@ -820,6 +840,19 @@ impl ActiveSession {
         if response.hovered() && self.remote_cursor_hidden {
             ctx.set_cursor_icon(egui::CursorIcon::None);
         }
+        if let Some(text) = self.remote_copy.take() {
+            // Only while the user works in the session: a PC copying on its
+            // own does not get to replace this computer's clipboard.
+            if focused && ctx.input(|i| i.focused) {
+                logging::event(format_args!(
+                    "Copied from the PC: {} characters",
+                    text.as_str().chars().count()
+                ));
+                ctx.output_mut(|o| o.copied_text = text.as_str().to_string());
+            } else {
+                logging::event("The PC's clipboard was not taken: the session was not in use");
+            }
+        }
 
         let to_remote = |pos: egui::Pos2| -> Option<(u16, u16)> {
             if !image.contains(pos) {
@@ -885,7 +918,13 @@ impl ActiveSession {
                 // swallows the key press; the release still arrives as a key.
                 Event::Copy if focused => self.send_key(keymap::C, true),
                 Event::Cut if focused => self.send_key(keymap::X, true),
-                Event::Paste(_) if focused => self.send_key(keymap::V, true),
+                Event::Paste(text) if focused => {
+                    if self.bookmark.share_clipboard {
+                        self.send(Command::Paste(ClipboardText::new(text)));
+                    } else {
+                        self.send_key(keymap::V, true);
+                    }
+                }
                 _ => {}
             }
         }

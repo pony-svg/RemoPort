@@ -9,8 +9,9 @@ side by side, and workspaces that bring in what your organization offers.
 > **Status: early preview.** Remote desktops open inside Remoport through its own
 > RDP engine, [`remoport-rdp`](remoport-rdp), built on IronRDP with parts from
 > [RustConn](https://github.com/totoshko88/RustConn) by Anton Isaiev. Screen, keyboard
-> and mouse work and the desktop follows the window's size; this still awaits testing
-> against real servers. Clipboard, sound and shared folders come next.
+> and mouse work, the desktop follows the window's size, and the PC's sound and a
+> shared text clipboard can be turned on per PC; this still awaits testing against
+> real servers. Microphone, shared folders and reconnection come next.
 
 ## Security
 
@@ -22,8 +23,11 @@ side by side, and workspaces that bring in what your organization offers.
   sign in without it. The original RDP security is never used.
 - **Passwords are remembered only if you ask, and only in the system keyring**
   (KWallet or GNOME Keyring). In memory they are wiped once used.
-- **Nothing is shared with the PC**: no clipboard, drive, printer, microphone or
-  smart card channel is offered.
+- **Nothing is shared with a PC unless you turn it on for that PC.** The clipboard,
+  when shared, carries text only: the PC gets just the text you paste into the
+  session, and what you copy there reaches this computer only while you are using
+  the session. Sound from the PC is played here as uncompressed audio only. No drive,
+  printer, microphone, camera or smart card is offered.
 - Remoport's files (your PCs, trusted certificates, activity log) are readable only by
   you, and the log never contains passwords.
 
@@ -57,15 +61,17 @@ te ofrece.
 > **Estado: vista previa.** Los escritorios remotos se abren dentro de Remoport con su
 > propio motor RDP, `remoport-rdp`, construido sobre IronRDP con partes de
 > [RustConn](https://github.com/totoshko88/RustConn), de Anton Isaiev. Pantalla, teclado
-> y ratón funcionan y el escritorio se ajusta al tamaño de la ventana; falta probarlo
-> contra servidores reales. El portapapeles, el sonido y las carpetas compartidas
-> vienen después.
+> y ratón funcionan, el escritorio se ajusta al tamaño de la ventana, y el sonido del
+> PC y un portapapeles de texto compartido se activan por PC; falta probarlo contra
+> servidores reales. El micrófono, las carpetas compartidas y la reconexión vienen
+> después.
 
 **Seguridad:** Remoport confirma la identidad del PC antes de usar tu contraseña (y te
 muestra la huella del certificado si no puede verificarlo), exige autenticación a nivel
 de red (NLA) salvo que lo permitas para un PC concreto, guarda contraseñas solo si lo
-pides y solo en el llavero del sistema, no comparte nada con el PC, y sus archivos
-solo los puedes leer tú.
+pides y solo en el llavero del sistema, no comparte nada con un PC salvo lo que actives
+para ese PC (el portapapeles solo lleva texto: el PC recibe únicamente lo que pegas en
+la sesión), y sus archivos solo los puedes leer tú.
 
 Remoport es software libre bajo la **GNU GPL, versión 3 o posterior**. El nombre y el
 logo de Remoport no están cubiertos por esa licencia: consulta

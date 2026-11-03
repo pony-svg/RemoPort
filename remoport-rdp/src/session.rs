@@ -1,9 +1,10 @@
 //! The active session: server updates out as frames, input in as commands.
 //! The loop, the reactivation sequence and the region helpers follow
-//! RustConn's client (`rustconn-core`, GPL-3.0-or-later), without clipboard,
-//! sound or devices.
+//! RustConn's client (`rustconn-core`, GPL-3.0-or-later); the clipboard's
+//! handling is Remoport's.
 
 use std::sync::mpsc;
+use std::time::Duration;
 
 use ironrdp_connector::connection_activation::{
     ConnectionActivationFactory, ConnectionActivationState,
@@ -16,9 +17,14 @@ use ironrdp_session::image::DecodedImage;
 use ironrdp_session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput};
 use ironrdp_tokio::{FramedRead, FramedWrite, single_sequence_step_read, split_tokio_framed};
 use tokio::sync::{mpsc as tokio_mpsc, watch};
+use tokio::time::Instant;
 
+use crate::clipboard::Clipboard;
 use crate::connect::Established;
 use crate::{Command, Error, Event, MouseButton, Rect};
+
+/// The V key, pressed for a paste.
+const V: u8 = 0x2F;
 
 pub(crate) async fn run(
     established: Established,
@@ -26,7 +32,11 @@ pub(crate) async fn run(
     mut commands: tokio_mpsc::UnboundedReceiver<Command>,
     mut cancelled: watch::Receiver<bool>,
 ) -> Result<(), Error> {
-    let Established { framed, result } = established;
+    let Established {
+        framed,
+        result,
+        mut clipboard,
+    } = established;
     let (mut reader, mut writer) = split_tokio_framed(framed);
     let mut image = DecodedImage::new(
         PixelFormat::BgrA32,
@@ -52,7 +62,16 @@ pub(crate) async fn run(
         height: image.height(),
     });
 
+    let lost = |e: std::io::Error| Error::ConnectionLost(e.to_string());
     loop {
+        let holding = clipboard.as_ref().is_some_and(Clipboard::holding);
+        let release_at = clipboard
+            .as_ref()
+            .and_then(Clipboard::deadline)
+            .map_or_else(
+                || Instant::now() + Duration::from_secs(3600),
+                Instant::from_std,
+            );
         tokio::select! {
             _ = cancelled.changed() => {
                 if let Ok(frames) = stage.graceful_shutdown() {
@@ -64,8 +83,31 @@ pub(crate) async fn run(
                 }
                 return Ok(());
             }
+            () = tokio::time::sleep_until(release_at), if holding => {
+                // The PC did not answer the paste in time: the keys go anyway.
+                for command in clipboard.as_mut().map(Clipboard::release).unwrap_or_default() {
+                    apply_command(command, &mut stage, &mut image, &mut writer, &mut input, events).await;
+                }
+            }
             Some(command) = commands.recv() => {
-                apply_command(command, &mut stage, &mut image, &mut writer, &mut input, events).await;
+                match (&mut clipboard, command) {
+                    // Input keeps its order behind a paste the PC has not taken yet.
+                    (Some(clip), command) if clip.holding() => clip.hold(command),
+                    (Some(clip), Command::Paste(text)) => {
+                        if let Some(frame) = clip.paste(text, &mut stage, events) {
+                            writer.write_all(&frame).await.map_err(lost)?;
+                        }
+                        let press = Command::Key { scancode: V, extended: false, pressed: true };
+                        if clip.holding() {
+                            clip.hold(press);
+                        } else {
+                            apply_command(press, &mut stage, &mut image, &mut writer, &mut input, events).await;
+                        }
+                    }
+                    (_, command) => {
+                        apply_command(command, &mut stage, &mut image, &mut writer, &mut input, events).await;
+                    }
+                }
             }
             read = reader.read_pdu() => {
                 let (action, payload) = read.map_err(|e| Error::ConnectionLost(e.to_string()))?;
@@ -86,6 +128,15 @@ pub(crate) async fn run(
                         // channel: not understood, not fatal.
                     }
                     Err(e) => return Err(Error::Protocol(format!("session error: {e}"))),
+                }
+                if let Some(clip) = &mut clipboard {
+                    let outcome = clip.drain(&mut stage, events);
+                    for frame in outcome.frames {
+                        writer.write_all(&frame).await.map_err(lost)?;
+                    }
+                    for command in outcome.release {
+                        apply_command(command, &mut stage, &mut image, &mut writer, &mut input, events).await;
+                    }
                 }
             }
         }
@@ -234,6 +285,8 @@ async fn apply_command(
             }]
         }
         Command::PointerMove { x, y } => vec![Operation::MouseMove(MousePosition { x, y })],
+        // The text, if shared, was offered to the PC before this.
+        Command::Paste(_) => vec![Operation::KeyPressed(Scancode::from_u8(false, V))],
         Command::MouseButton {
             x,
             y,

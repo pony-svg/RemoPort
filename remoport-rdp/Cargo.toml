@@ -14,6 +14,12 @@ ironrdp-pdu = "0.11"
 ironrdp-dvc = "0.10"
 ironrdp-displaycontrol = "0.10"
 ironrdp-input = "0.9"
+# Shared clipboard (text) and the PC's sound; the device channel carries no
+# device and is there because Windows only sends sound alongside it.
+ironrdp-cliprdr = "0.9"
+ironrdp-rdpsnd = "0.11"
+ironrdp-rdpdr = "0.9"
+ironrdp-core = "0.3"
 ironrdp-tokio = { version = "0.12", features = ["reqwest-native-tls"] }
 ironrdp-tls = { version = "0.3", features = ["native-tls"] }
 ironrdp-egfx = { version = "0.5", features = ["openh264-libloading"] }

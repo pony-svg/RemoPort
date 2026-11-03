@@ -30,7 +30,7 @@ pub struct AddEditPcDialog {
     pub audio_playback: AudioPlaybackMode,
     pub redirect_microphones: bool,
     pub redirect_cameras: bool,
-    pub redirect_clipboard: bool,
+    pub share_clipboard: bool,
     pub redirect_printers: bool,
     pub redirect_smartcards: bool,
     pub redirect_webauthn: bool,
@@ -61,10 +61,10 @@ impl Default for AddEditPcDialog {
             audio_playback: AudioPlaybackMode::LocalDevice,
             redirect_microphones: false,
             redirect_cameras: false,
-            redirect_clipboard: true,
+            share_clipboard: false,
             redirect_printers: false,
             redirect_smartcards: false,
-            redirect_webauthn: true,
+            redirect_webauthn: false,
             redirected_folders: Vec::new(),
             allow_without_nla: false,
             new_folder_path: "".to_string(),
@@ -105,7 +105,7 @@ impl AddEditPcDialog {
         self.audio_playback = bookmark.audio_playback;
         self.redirect_microphones = bookmark.redirect_microphones;
         self.redirect_cameras = bookmark.redirect_cameras;
-        self.redirect_clipboard = bookmark.redirect_clipboard;
+        self.share_clipboard = bookmark.share_clipboard;
         self.redirect_printers = bookmark.redirect_printers;
         self.redirect_smartcards = bookmark.redirect_smartcards;
         self.redirect_webauthn = bookmark.redirect_webauthn;
@@ -197,7 +197,7 @@ impl AddEditPcDialog {
                                 bookmark.audio_playback = self.audio_playback;
                                 bookmark.redirect_microphones = self.redirect_microphones;
                                 bookmark.redirect_cameras = self.redirect_cameras;
-                                bookmark.redirect_clipboard = self.redirect_clipboard;
+                                bookmark.share_clipboard = self.share_clipboard;
                                 bookmark.redirect_printers = self.redirect_printers;
                                 bookmark.redirect_smartcards = self.redirect_smartcards;
                                 bookmark.redirect_webauthn = self.redirect_webauthn;
@@ -351,11 +351,14 @@ impl AddEditPcDialog {
                 AudioPlaybackMode::LocalDevice,
                 "Play on this device",
             );
-            ui.radio_value(
-                &mut self.audio_playback,
-                AudioPlaybackMode::RemotePC,
-                "Play on remote PC",
-            );
+            ui.add_enabled_ui(false, |ui| {
+                ui.radio_value(
+                    &mut self.audio_playback,
+                    AudioPlaybackMode::RemotePC,
+                    "Play on remote PC",
+                )
+                .on_disabled_hover_text("Not available yet");
+            });
             ui.radio_value(
                 &mut self.audio_playback,
                 AudioPlaybackMode::Disabled,
@@ -364,13 +367,34 @@ impl AddEditPcDialog {
         });
 
         ui.add_space(10.0);
-        ui.label("Device redirection:");
-        ui.checkbox(&mut self.redirect_clipboard, "Clipboard");
-        ui.checkbox(&mut self.redirect_printers, "Printers");
-        ui.checkbox(&mut self.redirect_smartcards, "Smart cards");
-        ui.checkbox(&mut self.redirect_microphones, "Microphones");
-        ui.checkbox(&mut self.redirect_cameras, "Cameras");
-        ui.checkbox(&mut self.redirect_webauthn, "WebAuthn / Passkeys");
+        ui.label("Shared with this PC:");
+        ui.checkbox(&mut self.share_clipboard, "Clipboard (text)");
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(
+                    "The PC gets only the text you paste into the session, and what you copy \
+                     there reaches this computer only while you are using the session.",
+                )
+                .weak()
+                .size(12.0),
+            )
+            .wrap(),
+        );
+        ui.add_space(6.0);
+        // Not built yet: shown off, so nothing suggests they are shared.
+        ui.add_enabled_ui(false, |ui| {
+            for (label, value) in [
+                ("Printers", &mut self.redirect_printers),
+                ("Smart cards", &mut self.redirect_smartcards),
+                ("Microphones", &mut self.redirect_microphones),
+                ("Cameras", &mut self.redirect_cameras),
+                ("WebAuthn / Passkeys", &mut self.redirect_webauthn),
+            ] {
+                *value = false;
+                ui.checkbox(value, label)
+                    .on_disabled_hover_text("Not available yet");
+            }
+        });
     }
 
     fn show_folders_tab(&mut self, ui: &mut Ui) {

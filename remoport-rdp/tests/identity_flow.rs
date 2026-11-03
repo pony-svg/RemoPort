@@ -79,6 +79,8 @@ fn config(port: u16, store: &TrustStore) -> ConnectConfig {
         trust_store: store.clone(),
         timeout: Duration::from_secs(5),
         client_name: "remoport-test".to_string(),
+        clipboard: false,
+        sound: None,
     }
 }
 

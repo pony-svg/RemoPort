@@ -60,21 +60,31 @@ impl Handler {
         Self {
             input,
             formats: vec![
+                pcm_format(2, 48_000, 16),
+                pcm_format(1, 48_000, 16),
                 pcm_format(2, 44_100, 16),
                 pcm_format(1, 44_100, 16),
                 pcm_format(2, 22_050, 16),
                 pcm_format(1, 22_050, 16),
+                pcm_format(1, 16_000, 16),
+                pcm_format(1, 11_025, 16),
+                pcm_format(1, 8_000, 16),
             ],
             sink: Arc::new(Mutex::new(None)),
             events,
         }
     }
 
+    /// Captures `format`, the one the PC decodes the packets with.
     fn capture(&mut self, format: &AudioFormat, packet_bytes: usize) -> bool {
         if format.format != WaveFormat::PCM
             || format.bits_per_sample != 16
             || format.n_channels == 0
         {
+            let _ = self.events.send(Event::Progress(format!(
+                "The PC asked for the microphone in a format not offered: {}",
+                describe(format)
+            )));
             return false;
         }
         let packets = MicrophonePackets(Arc::clone(&self.sink));
@@ -96,22 +106,53 @@ impl Handler {
     }
 }
 
+/// A format for the log.
+fn describe(format: &AudioFormat) -> String {
+    format!(
+        "{:?} {} Hz, {} ch, {} bit",
+        format.format, format.n_samples_per_sec, format.n_channels, format.bits_per_sample
+    )
+}
+
 impl RdpeaiCaptureHandler for Handler {
     fn supported_formats(&self) -> &[AudioFormat] {
         &self.formats
     }
 
+    fn choose_formats(&self, server_formats: &[AudioFormat]) -> Vec<AudioFormat> {
+        let common = self
+            .formats
+            .iter()
+            .filter(|format| server_formats.contains(format))
+            .count();
+        let offered: Vec<String> = server_formats.iter().take(16).map(describe).collect();
+        let _ = self.events.send(Event::Progress(format!(
+            "Microphone: the PC offers {} formats, {common} usable here: {}",
+            server_formats.len(),
+            offered.join("; ")
+        )));
+        self.formats.clone()
+    }
+
     fn open(
         &mut self,
         capture_format: &AudioFormat,
-        _encode_format: &AudioFormat,
+        encode_format: &AudioFormat,
         packet_size: usize,
         sink: AudioPacketSink,
     ) -> i32 {
+        let _ = self.events.send(Event::Progress(format!(
+            "Microphone: the PC asks to capture {} and receive {}",
+            describe(capture_format),
+            describe(encode_format)
+        )));
         if let Ok(mut slot) = self.sink.lock() {
             *slot = Some(sink);
         }
-        if self.capture(capture_format, packet_size) {
+        // Nothing here compresses, so what is captured is what the PC decodes:
+        // its choice among the formats offered. Windows describes its own
+        // capture format differently (often WAVE_FORMAT_EXTENSIBLE).
+        if self.capture(encode_format, packet_size) {
             let _ = self.events.send(Event::Microphone(true));
             0
         } else {
@@ -132,14 +173,17 @@ impl RdpeaiCaptureHandler for Handler {
     }
 
     fn close(&mut self) {
-        if let Ok(mut slot) = self.sink.lock() {
-            *slot = None;
-        }
+        let was_open = self.sink.lock().is_ok_and(|mut slot| slot.take().is_some());
         self.input.stop();
         let _ = self.events.send(Event::Microphone(false));
-        let _ = self
-            .events
-            .send(Event::Progress("The PC closed the microphone".to_string()));
+        let _ = self.events.send(Event::Progress(
+            if was_open {
+                "The PC closed the microphone"
+            } else {
+                "The PC closed the microphone channel without capturing"
+            }
+            .to_string(),
+        ));
     }
 }
 
@@ -150,11 +194,19 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         started: Arc<Mutex<Option<MicrophonePackets>>>,
+        format: Arc<Mutex<Option<(u32, u16)>>>,
     }
 
     impl SoundInput for Recorder {
-        fn start(&mut self, _: u32, _: u16, _: usize, packets: MicrophonePackets) -> bool {
+        fn start(
+            &mut self,
+            rate: u32,
+            channels: u16,
+            _: usize,
+            packets: MicrophonePackets,
+        ) -> bool {
             *self.started.lock().unwrap() = Some(packets);
+            *self.format.lock().unwrap() = Some((rate, channels));
             true
         }
         fn stop(&mut self) {
@@ -201,6 +253,57 @@ mod tests {
             })
             .collect();
         assert_eq!(states, vec![true, false]);
+    }
+
+    /// Windows describes its capture format as WAVE_FORMAT_EXTENSIBLE; what
+    /// counts is the format it receives.
+    #[test]
+    fn the_pc_gets_the_format_it_chose_however_it_describes_its_capture() {
+        let (events, received) = mpsc::channel();
+        let recorder = Recorder::default();
+        let format = Arc::clone(&recorder.format);
+        let mut handler = Handler::new(Box::new(recorder), events);
+        let extensible = AudioFormat {
+            format: WaveFormat::EXTENSIBLE,
+            n_samples_per_sec: 48_000,
+            bits_per_sample: 32,
+            ..pcm_format(2, 48_000, 16)
+        };
+        let chosen = pcm_format(1, 22_050, 16);
+        assert_eq!(handler.open(&extensible, &chosen, 960, Box::new(|_| {})), 0);
+        assert_eq!(*format.lock().unwrap(), Some((22_050, 1)));
+        assert!(
+            received
+                .try_iter()
+                .any(|e| matches!(e, Event::Microphone(true)))
+        );
+    }
+
+    #[test]
+    fn what_the_pc_offers_is_logged_and_nothing_is_silently_refused() {
+        let (events, received) = mpsc::channel();
+        let mut handler = Handler::new(Box::new(Recorder::default()), events);
+        let offered = [pcm_format(2, 44_100, 16), pcm_format(2, 44_100, 8)];
+        assert_eq!(handler.choose_formats(&offered), handler.formats);
+        let adpcm = AudioFormat {
+            format: WaveFormat::ADPCM,
+            ..pcm_format(2, 44_100, 16)
+        };
+        assert_eq!(handler.open(&adpcm, &adpcm, 100, Box::new(|_| {})), E_FAIL);
+        handler.close();
+        let log: Vec<String> = received
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::Progress(line) => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert!(log[0].contains("offers 2 formats, 1 usable"), "{log:?}");
+        assert!(log.iter().any(|l| l.contains("not offered")), "{log:?}");
+        assert!(
+            log.iter().any(|l| l.contains("without capturing")),
+            "{log:?}"
+        );
     }
 
     #[test]

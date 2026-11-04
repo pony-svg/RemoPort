@@ -221,7 +221,9 @@ impl SoundInput for Microphone {
             .spawn(move || {
                 let samples_per_second = u64::from(rate) * u64::from(channels);
                 let builder = PacketBuilder::new(packet_bytes, packets, muted, samples_per_second);
-                match capture(rate, channels, builder) {
+                let frames = packet_bytes / (2 * usize::from(channels.max(1)));
+                let frames = u32::try_from(frames).unwrap_or(u32::MAX).max(1);
+                match capture(rate, channels, frames, builder) {
                     Ok(stream) => {
                         let _ = started.send(true);
                         // Captures until the PC closes the microphone.
@@ -269,6 +271,8 @@ struct PacketBuilder {
     /// How much was captured and how loud, for the log: never the sound.
     samples: u64,
     peak: u16,
+    /// Samples at the very top of the range: sound too loud for the microphone.
+    clipped: u64,
 }
 
 impl PacketBuilder {
@@ -287,6 +291,7 @@ impl PacketBuilder {
             samples_per_second,
             samples: 0,
             peak: 0,
+            clipped: 0,
         }
     }
 
@@ -294,7 +299,8 @@ impl PacketBuilder {
     fn summary(&self) -> String {
         let seconds = self.samples as f64 / self.samples_per_second.max(1) as f64;
         let loudest = u32::from(self.peak) * 100 / 32768;
-        format!("Microphone: {seconds:.1} s captured, loudest {loudest}%")
+        let clipped = self.clipped as f64 * 100.0 / self.samples.max(1) as f64;
+        format!("Microphone: {seconds:.1} s captured, loudest {loudest}%, {clipped:.1}% clipped")
     }
 
     fn push(&mut self, samples: impl IntoIterator<Item = i16>) {
@@ -303,6 +309,9 @@ impl PacketBuilder {
             let sample = if muted { 0 } else { sample };
             self.samples += 1;
             self.peak = self.peak.max(sample.unsigned_abs());
+            if sample.unsigned_abs() >= 32767 {
+                self.clipped += 1;
+            }
             self.pending.extend_from_slice(&sample.to_le_bytes());
         }
         while self.pending.len() >= self.packet_bytes {
@@ -321,22 +330,47 @@ impl Drop for PacketBuilder {
 
 /// The default input, as 16-bit samples where the device gives them, else
 /// floats converted.
-fn capture(rate: u32, channels: u16, builder: PacketBuilder) -> Result<cpal::Stream, String> {
+fn capture(
+    rate: u32,
+    channels: u16,
+    frames: u32,
+    builder: PacketBuilder,
+) -> Result<cpal::Stream, String> {
     let device = cpal::default_host()
         .default_input_device()
         .ok_or("this computer has no microphone")?;
-    let config = cpal::StreamConfig {
-        channels,
-        sample_rate: rate,
-        buffer_size: cpal::BufferSize::Default,
-    };
     let builder = Arc::new(Mutex::new(builder));
-    let i16_builder = Arc::clone(&builder);
-    let stream = device
+    // Chunks of the PC's packet size where the device can, so the sound leaves
+    // as evenly as the PC expects it.
+    let mut failure = String::new();
+    for buffer_size in [cpal::BufferSize::Fixed(frames), cpal::BufferSize::Default] {
+        let config = cpal::StreamConfig {
+            channels,
+            sample_rate: rate,
+            buffer_size,
+        };
+        match open_input(&device, config, &builder) {
+            Ok(stream) => {
+                stream.play().map_err(|e| e.to_string())?;
+                return Ok(stream);
+            }
+            Err(e) => failure = e,
+        }
+    }
+    Err(failure)
+}
+
+fn open_input(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    builder: &Arc<Mutex<PacketBuilder>>,
+) -> Result<cpal::Stream, String> {
+    let (for_i16, for_f32) = (Arc::clone(builder), Arc::clone(builder));
+    device
         .build_input_stream(
             config,
             move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                if let Ok(mut builder) = i16_builder.lock() {
+                if let Ok(mut builder) = for_i16.lock() {
                     builder.push(data.iter().copied());
                 }
             },
@@ -347,7 +381,7 @@ fn capture(rate: u32, channels: u16, builder: PacketBuilder) -> Result<cpal::Str
             device.build_input_stream(
                 config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    if let Ok(mut builder) = builder.lock() {
+                    if let Ok(mut builder) = for_f32.lock() {
                         // `as` saturates; the clamp keeps the scale honest.
                         builder.push(data.iter().map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i16));
                     }
@@ -356,9 +390,7 @@ fn capture(rate: u32, channels: u16, builder: PacketBuilder) -> Result<cpal::Str
                 None,
             )
         })
-        .map_err(|e| e.to_string())?;
-    stream.play().map_err(|e| e.to_string())?;
-    Ok(stream)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -376,13 +408,26 @@ mod tests {
             samples_per_second: 4,
             samples: 0,
             peak: 0,
+            clipped: 0,
         };
         builder.push([100, -16384, 200, 300]);
-        assert_eq!(builder.summary(), "Microphone: 1.0 s captured, loudest 50%");
+        assert_eq!(
+            builder.summary(),
+            "Microphone: 1.0 s captured, loudest 50%, 0.0% clipped"
+        );
         // Muted, the PC gets silence, and the log counts it as silence.
         muted.store(true, Ordering::Relaxed);
         builder.push([32767; 4]);
-        assert_eq!(builder.summary(), "Microphone: 2.0 s captured, loudest 50%");
+        assert_eq!(
+            builder.summary(),
+            "Microphone: 2.0 s captured, loudest 50%, 0.0% clipped"
+        );
+        muted.store(false, Ordering::Relaxed);
+        builder.push([32767, -32768, 0, 0]);
+        assert_eq!(
+            builder.summary(),
+            "Microphone: 3.0 s captured, loudest 100%, 16.7% clipped"
+        );
     }
 
     #[test]

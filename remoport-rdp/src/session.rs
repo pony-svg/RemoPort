@@ -79,6 +79,11 @@ pub(crate) async fn run(
                 Instant::from_std,
             );
         tokio::select! {
+            // In this order, the screen last. Decoding a frame takes this thread
+            // for milliseconds, and picking at random let a burst of frames hold
+            // back the microphone, which needs a packet out every 10 ms, and the
+            // user's input. Those are few enough never to starve the screen.
+            biased;
             _ = cancelled.changed() => {
                 if let Ok(frames) = stage.graceful_shutdown() {
                     for frame in frames {

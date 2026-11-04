@@ -1,3 +1,4 @@
+use crate::i18n::{t, tf};
 use crate::logging;
 use crate::model::{
     AudioPlaybackMode, ColorQuality, DeviceBookmark, RedirectedFolder, ResolutionOption,
@@ -57,7 +58,7 @@ impl Default for AddEditPcDialog {
             active_tab: EditPcTab::General,
             pc_name: "".to_string(),
             friendly_name: "".to_string(),
-            group_name: "Saved PCs".to_string(),
+            group_name: String::new(),
             username: "".to_string(),
             resolution: ResolutionOption::Native,
             color_quality: ColorQuality::High32Bit,
@@ -106,7 +107,13 @@ impl AddEditPcDialog {
         self.active_tab = EditPcTab::General;
         self.pc_name = bookmark.pc_name.clone();
         self.friendly_name = bookmark.friendly_name.clone();
-        self.group_name = bookmark.group_name.clone();
+        // The default group's name is stored in English: left empty here, the
+        // field shows it translated, and saving empty keeps it.
+        self.group_name = if bookmark.group_name == "Saved PCs" {
+            String::new()
+        } else {
+            bookmark.group_name.clone()
+        };
         self.username = bookmark.username.clone();
         self.resolution = bookmark.resolution;
         self.color_quality = bookmark.color_quality;
@@ -136,7 +143,11 @@ impl AddEditPcDialog {
             return;
         }
 
-        let title = if self.is_edit { "Edit PC" } else { "Add PC" };
+        let title = if self.is_edit {
+            t("Edit PC")
+        } else {
+            t("Add PC")
+        };
 
         // `is_open` is cleared by the window's ×; Save and Cancel set `close`.
         // Both are applied after the window is drawn.
@@ -152,14 +163,14 @@ impl AddEditPcDialog {
             .show(ctx, |ui| {
                 // Tab Selection Bar
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.active_tab, EditPcTab::General, "General");
-                    ui.selectable_value(&mut self.active_tab, EditPcTab::Display, "Display");
+                    ui.selectable_value(&mut self.active_tab, EditPcTab::General, t("General"));
+                    ui.selectable_value(&mut self.active_tab, EditPcTab::Display, t("Display"));
                     ui.selectable_value(
                         &mut self.active_tab,
                         EditPcTab::DevicesAudio,
-                        "Devices & Audio",
+                        t("Devices & Audio"),
                     );
-                    ui.selectable_value(&mut self.active_tab, EditPcTab::Folders, "Folders");
+                    ui.selectable_value(&mut self.active_tab, EditPcTab::Folders, t("Folders"));
                 });
                 ui.separator();
 
@@ -183,10 +194,11 @@ impl AddEditPcDialog {
                 // Dialog Action Buttons
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(theme.primary_button("Save")).clicked() {
+                        if ui.add(theme.primary_button(t("Save"))).clicked() {
                             let kdc_error = remoport_rdp::normalize_kdc_address(&self.kdc).err();
                             if self.pc_name.trim().is_empty() {
-                                self.validation_error = Some("PC name cannot be empty".to_string());
+                                self.validation_error =
+                                    Some(t("PC name cannot be empty").to_string());
                                 logging::event(format_args!(
                                     "{title}: Save refused, the PC name is empty"
                                 ));
@@ -240,7 +252,7 @@ impl AddEditPcDialog {
                             }
                         }
 
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(t("Cancel")).clicked() {
                             logging::event(format_args!("{title}: cancelled"));
                             close = true;
                         }
@@ -262,34 +274,34 @@ impl AddEditPcDialog {
             .num_columns(2)
             .spacing([12.0, 10.0])
             .show(ui, |ui| {
-                ui.label("PC name:");
+                ui.label(t("PC name:"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.pc_name)
-                        .hint_text("hostname, IP, or FQDN")
+                        .hint_text(t("hostname, IP, or FQDN"))
                         .desired_width(320.0),
                 );
                 ui.end_row();
 
-                ui.label("Friendly name:");
+                ui.label(t("Friendly name:"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.friendly_name)
-                        .hint_text("Optional")
+                        .hint_text(t("Optional"))
                         .desired_width(320.0),
                 );
                 ui.end_row();
 
-                ui.label("User account:");
+                ui.label(t("User account:"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.username)
-                        .hint_text("Leave empty to be asked when connecting")
+                        .hint_text(t("Leave empty to be asked when connecting"))
                         .desired_width(320.0),
                 );
                 ui.end_row();
 
-                ui.label("Group:");
+                ui.label(t("Group:"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.group_name)
-                        .hint_text("Saved PCs")
+                        .hint_text(t("Saved PCs"))
                         .desired_width(320.0),
                 );
                 ui.end_row();
@@ -297,16 +309,16 @@ impl AddEditPcDialog {
                 ui.label("RD Gateway:");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.gateway)
-                        .hint_text("Optional, e.g. gateway.example.com")
+                        .hint_text(t("Optional, e.g. gateway.example.com"))
                         .desired_width(320.0),
                 );
                 ui.end_row();
 
                 if !self.gateway.trim().is_empty() {
-                    ui.label("Gateway account:");
+                    ui.label(t("Gateway account:"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.gateway_username)
-                            .hint_text("Leave empty to use the PC's account")
+                            .hint_text(t("Leave empty to use the PC's account"))
                             .desired_width(320.0),
                     );
                     ui.end_row();
@@ -314,32 +326,32 @@ impl AddEditPcDialog {
             });
         if !self.gateway.trim().is_empty() {
             ui.label(
-                egui::RichText::new(
+                egui::RichText::new(t(
                     "The gateway's certificate must come from an authority this computer \
                      trusts. With an account of its own, its password is asked when connecting.",
-                )
+                ))
                 .size(11.5)
                 .weak(),
             );
         }
 
         ui.add_space(12.0);
-        ui.checkbox(&mut self.kerberos, "Sign in with Kerberos");
+        ui.checkbox(&mut self.kerberos, t("Sign in with Kerberos"));
         if self.kerberos {
             ui.horizontal(|ui| {
                 ui.label("KDC:");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.kdc)
-                        .hint_text("Optional, e.g. dc01.example.com")
+                        .hint_text(t("Optional, e.g. dc01.example.com"))
                         .desired_width(280.0),
                 );
             });
             ui.label(
-                egui::RichText::new(
+                egui::RichText::new(t(
                     "For accounts that may not use NTLM. Name the PC by its DNS name and sign in \
                      as user@example.com. Without a KDC, Remoport looks in krb5.conf, then asks \
                      the domain itself.",
-                )
+                ))
                 .size(11.5)
                 .weak(),
             );
@@ -347,29 +359,29 @@ impl AddEditPcDialog {
         ui.add_space(8.0);
         ui.checkbox(
             &mut self.allow_without_nla,
-            "Allow signing in without Network Level Authentication",
+            t("Allow signing in without Network Level Authentication"),
         );
         ui.label(
-            egui::RichText::new(
+            egui::RichText::new(t(
                 "Less secure: the PC shows its sign-in screen before checking who you are. \
                  Turn on only for an old PC you trust that cannot use NLA.",
-            )
+            ))
             .size(11.5)
             .weak(),
         );
     }
 
     fn show_display_tab(&mut self, ui: &mut Ui) {
-        ui.label("Configure remote screen resolution and display options:");
+        ui.label(t("Configure remote screen resolution and display options:"));
         ui.add_space(8.0);
 
-        egui::ComboBox::from_label("Resolution")
+        egui::ComboBox::from_label(t("Resolution"))
             .selected_text(self.resolution.display_label())
             .show_ui(ui, |ui| {
                 ui.selectable_value(
                     &mut self.resolution,
                     ResolutionOption::Native,
-                    "Default for this display",
+                    t("Default for this display"),
                 );
                 ui.selectable_value(
                     &mut self.resolution,
@@ -390,93 +402,93 @@ impl AddEditPcDialog {
 
         ui.add_space(8.0);
 
-        egui::ComboBox::from_label("Color quality")
+        egui::ComboBox::from_label(t("Color quality"))
             .selected_text(match self.color_quality {
-                ColorQuality::High32Bit => "High (32 bit)",
-                ColorQuality::Medium16Bit => "Medium (16 bit)",
+                ColorQuality::High32Bit => t("High (32 bit)"),
+                ColorQuality::Medium16Bit => t("Medium (16 bit)"),
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(
                     &mut self.color_quality,
                     ColorQuality::High32Bit,
-                    "High (32 bit)",
+                    t("High (32 bit)"),
                 );
                 ui.selectable_value(
                     &mut self.color_quality,
                     ColorQuality::Medium16Bit,
-                    "Medium (16 bit)",
+                    t("Medium (16 bit)"),
                 );
             });
 
         ui.add_space(8.0);
-        ui.checkbox(&mut self.fit_to_window, "Fit session to window");
+        ui.checkbox(&mut self.fit_to_window, t("Fit session to window"));
         ui.horizontal(|ui| {
-            ui.label("Screens:");
+            ui.label(t("Screens:"));
             for count in 1..=4u8 {
                 ui.selectable_value(&mut self.screens, count, count.to_string());
             }
         });
         if self.screens > 1 {
             ui.label(
-                egui::RichText::new(
+                egui::RichText::new(t(
                     "Remoport opens one window per screen. Move each to its screen and press \
                      Ctrl+Alt+Enter to make it fill that screen; the PC follows their sizes.",
-                )
+                ))
                 .size(11.5)
                 .weak(),
             );
         }
         ui.checkbox(
             &mut self.hidpi_full_resolution,
-            "Use full resolution on HiDPI displays",
+            t("Use full resolution on HiDPI displays"),
         );
     }
 
     fn show_devices_audio_tab(&mut self, ui: &mut Ui) {
-        ui.label("Audio playback:");
+        ui.label(t("Audio playback:"));
         ui.horizontal(|ui| {
             ui.radio_value(
                 &mut self.audio_playback,
                 AudioPlaybackMode::LocalDevice,
-                "Play on this device",
+                t("Play on this device"),
             );
             ui.add_enabled_ui(false, |ui| {
                 ui.radio_value(
                     &mut self.audio_playback,
                     AudioPlaybackMode::RemotePC,
-                    "Play on remote PC",
+                    t("Play on remote PC"),
                 )
-                .on_disabled_hover_text("Not available yet");
+                .on_disabled_hover_text(t("Not available yet"));
             });
             ui.radio_value(
                 &mut self.audio_playback,
                 AudioPlaybackMode::Disabled,
-                "Don't play sound",
+                t("Don't play sound"),
             );
         });
 
         ui.add_space(10.0);
-        ui.label("Shared with this PC:");
-        ui.checkbox(&mut self.share_clipboard, "Clipboard (text)");
+        ui.label(t("Shared with this PC:"));
+        ui.checkbox(&mut self.share_clipboard, t("Clipboard (text)"));
         ui.add(
             egui::Label::new(
-                egui::RichText::new(
+                egui::RichText::new(t(
                     "The PC gets only the text you paste into the session, and what you copy \
                      there reaches this computer only while you are using the session.",
-                )
+                ))
                 .weak()
                 .size(12.0),
             )
             .wrap(),
         );
         ui.add_space(6.0);
-        ui.checkbox(&mut self.redirect_microphones, "Microphone");
+        ui.checkbox(&mut self.redirect_microphones, t("Microphone"));
         ui.add(
             egui::Label::new(
-                egui::RichText::new(
+                egui::RichText::new(t(
                     "The PC can use it only while it asks for it, and Remoport shows when it is \
                      on, with a button to mute it.",
-                )
+                ))
                 .weak()
                 .size(12.0),
             )
@@ -486,20 +498,22 @@ impl AddEditPcDialog {
         // Not built yet: shown off, so nothing suggests they are shared.
         ui.add_enabled_ui(false, |ui| {
             for (label, value) in [
-                ("Printers", &mut self.redirect_printers),
-                ("Smart cards", &mut self.redirect_smartcards),
-                ("Cameras", &mut self.redirect_cameras),
-                ("WebAuthn / Passkeys", &mut self.redirect_webauthn),
+                (t("Printers"), &mut self.redirect_printers),
+                (t("Smart cards"), &mut self.redirect_smartcards),
+                (t("Cameras"), &mut self.redirect_cameras),
+                (t("WebAuthn / Passkeys"), &mut self.redirect_webauthn),
             ] {
                 *value = false;
                 ui.checkbox(value, label)
-                    .on_disabled_hover_text("Not available yet");
+                    .on_disabled_hover_text(t("Not available yet"));
             }
         });
     }
 
     fn show_folders_tab(&mut self, ui: &mut Ui) {
-        ui.label("Choose the local folders to share with the remote session:");
+        ui.label(t(
+            "Choose the local folders to share with the remote session:",
+        ));
         ui.add_space(6.0);
 
         ui.horizontal(|ui| {
@@ -508,7 +522,7 @@ impl AddEditPcDialog {
                     .hint_text("/home/user/Documents")
                     .desired_width(280.0),
             );
-            if ui.button("+ Add Folder").clicked() && !self.new_folder_path.trim().is_empty() {
+            if ui.button(t("+ Add Folder")).clicked() && !self.new_folder_path.trim().is_empty() {
                 let path = expand_home(self.new_folder_path.trim());
                 if std::path::Path::new(&path).is_dir() {
                     logging::event(format_args!("Folder added to share: {path}"));
@@ -520,7 +534,7 @@ impl AddEditPcDialog {
                     self.new_folder_path.clear();
                     self.folder_error = None;
                 } else {
-                    self.folder_error = Some(format!("{path} is not a folder on this computer."));
+                    self.folder_error = Some(tf("{} is not a folder on this computer.", &[&path]));
                 }
             }
         });
@@ -529,10 +543,10 @@ impl AddEditPcDialog {
         }
         ui.add(
             egui::Label::new(
-                egui::RichText::new(
+                egui::RichText::new(t(
                     "The PC sees each folder as a drive and cannot reach anything outside it. \
                      Folders are read-only unless you allow changes.",
-                )
+                ))
                 .weak()
                 .size(12.0),
             )
@@ -547,14 +561,14 @@ impl AddEditPcDialog {
             .show(ui, |ui| {
                 if self.redirected_folders.is_empty() {
                     ui.label(
-                        egui::RichText::new("No folders added yet.")
+                        egui::RichText::new(t("No folders added yet."))
                             .color(Color32::from_rgb(140, 140, 140)),
                     );
                 } else {
                     for (i, folder) in self.redirected_folders.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label(format!("📁 {}", folder.path));
-                            ui.checkbox(&mut folder.writable, "Allow changes");
+                            ui.checkbox(&mut folder.writable, t("Allow changes"));
                             if ui.button("❌").clicked() {
                                 remove_index = Some(i);
                             }
@@ -601,19 +615,19 @@ impl AddWorkspaceDialog {
         // As in the PC dialog: × clears `is_open`, Cancel sets `close`.
         let mut is_open = self.is_open;
         let mut close = false;
-        Window::new("Subscribe to a workspace")
+        Window::new(t("Subscribe to a workspace"))
             .open(&mut is_open)
             .collapsible(false)
             .resizable(false)
             .default_size(vec2(440.0, 240.0))
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.label("Enter the address of your organization's workspace feed, or your work email:");
+                ui.label(t("Enter the address of your organization's workspace feed, or your work email:"));
                 ui.add_space(8.0);
 
                 ui.add(
                     egui::TextEdit::singleline(&mut self.email_or_url)
-                        .hint_text("you@company.com or https://rdweb.example.com/RDWeb/Feed/webfeed.aspx")
+                        .hint_text(t("you@company.com or https://rdweb.example.com/RDWeb/Feed/webfeed.aspx"))
                         .desired_width(400.0),
                 );
 
@@ -627,13 +641,13 @@ impl AddWorkspaceDialog {
 
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(theme.primary_button("Subscribe")).clicked() {
+                        if ui.add(theme.primary_button(t("Subscribe"))).clicked() {
                             let entry = self.email_or_url.trim();
                             if entry.is_empty() {
-                                self.validation_message = Some("Please enter an email or workspace URL".to_string());
+                                self.validation_message = Some(t("Please enter an email or workspace URL").to_string());
                                 logging::event("Workspace dialog: Subscribe with nothing entered");
                             } else {
-                                self.validation_message = Some("Workspace subscriptions are not available yet in this preview.".to_string());
+                                self.validation_message = Some(t("Workspace subscriptions are not available yet in this preview.").to_string());
                                 let kind = if entry.contains("://") { "a feed URL" } else { "an email address" };
                                 logging::event(format_args!(
                                     "Workspace dialog: Subscribe with {kind} (not available yet)"
@@ -641,7 +655,7 @@ impl AddWorkspaceDialog {
                             }
                         }
 
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(t("Cancel")).clicked() {
                             logging::event("Workspace dialog: cancelled");
                             close = true;
                         }

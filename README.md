@@ -15,8 +15,8 @@ side by side, and workspaces that bring in what your organization offers.
 > PCs behind an RD Gateway are reached through it, and accounts that may not use NTLM
 > sign in with Kerberos. A session can span several screens, one window each, and go
 > full screen (Ctrl+Alt+Enter); a Keys menu sends the combinations this computer
-> keeps for itself, such as the Windows key or Alt+Tab. This still awaits testing
-> against real servers.
+> keeps for itself, such as the Windows key or Alt+Tab. The interface is in English or
+> Spanish, by the system's language. This still awaits testing against real servers.
 
 ## Security
 
@@ -81,7 +81,8 @@ te ofrece.
 > pueden usar NTLM inician sesión con Kerberos. Una sesión puede usar varias
 > pantallas, una ventana cada una, y pasar a pantalla completa (Ctrl+Alt+Enter); un
 > menú Teclas envía las combinaciones que este equipo se reserva, como la tecla
-> Windows o Alt+Tab. Falta probarlo contra servidores reales.
+> Windows o Alt+Tab. La interfaz está en inglés o español, según el idioma del
+> sistema. Falta probarlo contra servidores reales.
 
 **Seguridad:** Remoport confirma la identidad del PC antes de usar tu contraseña (y te
 muestra la huella del certificado si no puede verificarlo), rechaza un RD Gateway cuyo

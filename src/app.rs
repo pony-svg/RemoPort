@@ -1,6 +1,7 @@
 use crate::credentials;
 use crate::dialogs::{AddEditPcDialog, AddWorkspaceDialog};
 use crate::fonts;
+use crate::i18n::{t, tf};
 use crate::icons::{self, Icon};
 use crate::logging;
 use crate::model::{
@@ -158,9 +159,9 @@ impl RemoportApp {
         ui.vertical_centered(|ui| {
             ui.add_space(12.0);
             for (tab, icon, label) in [
-                (NavTab::Favorites, Icon::Star, "Favorites"),
-                (NavTab::Devices, Icon::Monitor, "Devices"),
-                (NavTab::Apps, Icon::Window, "Apps"),
+                (NavTab::Favorites, Icon::Star, t("Favorites")),
+                (NavTab::Devices, Icon::Monitor, t("Devices")),
+                (NavTab::Apps, Icon::Window, t("Apps")),
             ] {
                 if self
                     .rail_item(ui, icon, label, self.state.active_tab == tab)
@@ -178,7 +179,7 @@ impl RemoportApp {
             );
             ui.add_space(8.0);
 
-            let add = self.rail_item(ui, Icon::Plus, "Add", false);
+            let add = self.rail_item(ui, Icon::Plus, t("Add"), false);
             let menu = ui.make_persistent_id("add_menu");
             if add.clicked() {
                 logging::event("Add menu opened");
@@ -193,8 +194,8 @@ impl RemoportApp {
         ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
             ui.add_space(12.0);
             if self
-                .rail_item(ui, Icon::Feedback, "Feedback", false)
-                .on_hover_text("Report a problem or suggest an idea")
+                .rail_item(ui, Icon::Feedback, t("Feedback"), false)
+                .on_hover_text(t("Report a problem or suggest an idea"))
                 .clicked()
             {
                 logging::event("Opened the feedback page");
@@ -202,7 +203,7 @@ impl RemoportApp {
             }
             let settings = self.state.active_tab == NavTab::Settings;
             if self
-                .rail_item(ui, Icon::Gear, "Settings", settings)
+                .rail_item(ui, Icon::Gear, t("Settings"), settings)
                 .clicked()
             {
                 self.open_page(NavTab::Settings);
@@ -255,13 +256,13 @@ impl RemoportApp {
     }
 
     fn add_menu_items(&mut self, ui: &mut Ui) {
-        if ui.button("Add a PC…").clicked() {
+        if ui.button(t("Add a PC…")).clicked() {
             self.add_edit_dialog.open_add(self.state.default_resolution);
         }
-        if ui.button("Subscribe to a workspace…").clicked() {
+        if ui.button(t("Subscribe to a workspace…")).clicked() {
             self.add_workspace_dialog.open();
         }
-        if ui.button("Sign in to an organization…").clicked() {
+        if ui.button(t("Sign in to an organization…")).clicked() {
             logging::event("Add menu: Sign in to an organization");
             self.add_workspace_dialog.open();
         }
@@ -305,21 +306,24 @@ impl RemoportApp {
 
     fn show_header(&mut self, ui: &mut Ui) {
         let (title, subtitle) = match self.state.active_tab {
-            NavTab::Favorites => ("Favorites", "The PCs and apps you starred".to_string()),
+            NavTab::Favorites => (
+                t("Favorites"),
+                t("The PCs and apps you starred").to_string(),
+            ),
             NavTab::Devices => (
-                "Devices",
+                t("Devices"),
                 self.group_filter
                     .clone()
-                    .unwrap_or_else(|| "Saved on this computer".to_string()),
+                    .unwrap_or_else(|| t("Saved on this computer").to_string()),
             ),
             NavTab::Apps => (
-                "Apps",
+                t("Apps"),
                 self.workspace_filter
                     .clone()
-                    .unwrap_or_else(|| "Published by your workspaces".to_string()),
+                    .unwrap_or_else(|| t("Published by your workspaces").to_string()),
             ),
             NavTab::Settings => (
-                "Settings",
+                t("Settings"),
                 format!("Remoport {}", env!("CARGO_PKG_VERSION")),
             ),
         };
@@ -341,12 +345,12 @@ impl RemoportApp {
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 self.account_button(ui);
                 ui.add_space(2.0);
-                if self.icon_button(ui, Icon::Help, "Help").clicked() {
+                if self.icon_button(ui, Icon::Help, t("Help")).clicked() {
                     logging::event("Opened help");
                     ui.ctx().open_url(egui::OpenUrl::new_tab(HELP_URL));
                 }
                 if self.state.active_tab == NavTab::Devices {
-                    let more = self.icon_button(ui, Icon::More, "View and sort");
+                    let more = self.icon_button(ui, Icon::More, t("View and sort"));
                     let menu = ui.make_persistent_id("view_menu");
                     if more.clicked() {
                         ui.memory_mut(|m| m.toggle_popup(menu));
@@ -376,21 +380,25 @@ impl RemoportApp {
     }
 
     fn view_menu_choices(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("View").strong());
-        ui.selectable_value(&mut self.state.view_mode, ViewMode::Grid, "Cards");
-        ui.selectable_value(&mut self.state.view_mode, ViewMode::List, "List");
+        ui.label(RichText::new(t("View")).strong());
+        ui.selectable_value(&mut self.state.view_mode, ViewMode::Grid, t("Cards"));
+        ui.selectable_value(&mut self.state.view_mode, ViewMode::List, t("List"));
         ui.separator();
-        ui.label(RichText::new("Sort by").strong());
-        ui.selectable_value(&mut self.state.sort_option, SortOption::DeviceName, "Name");
+        ui.label(RichText::new(t("Sort by")).strong());
+        ui.selectable_value(
+            &mut self.state.sort_option,
+            SortOption::DeviceName,
+            t("Name"),
+        );
         ui.selectable_value(
             &mut self.state.sort_option,
             SortOption::TimeLastConnected,
-            "Last connected",
+            t("Last connected"),
         );
         ui.selectable_value(
             &mut self.state.sort_option,
             SortOption::Manual,
-            "Order added",
+            t("Order added"),
         );
     }
 
@@ -400,7 +408,7 @@ impl RemoportApp {
         painter.circle_filled(rect.center(), 15.0, self.theme.accent);
         icons::paint(painter, rect.shrink(9.0), Icon::Person, Color32::WHITE);
         let response = response
-            .on_hover_text("Account")
+            .on_hover_text(t("Account"))
             .on_hover_cursor(CursorIcon::PointingHand);
         let menu = ui.make_persistent_id("account_menu");
         if response.clicked() {
@@ -423,7 +431,7 @@ impl RemoportApp {
                     RichText::new(&self.state.user_account.email).color(self.theme.text_secondary),
                 );
                 ui.separator();
-                if ui.button("Sign in to an organization…").clicked() {
+                if ui.button(t("Sign in to an organization…")).clicked() {
                     logging::event("Account menu: Sign in to an organization");
                     self.add_workspace_dialog.open();
                 }
@@ -466,7 +474,7 @@ impl RemoportApp {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.search_query)
                                 .frame(false)
-                                .hint_text("Search")
+                                .hint_text(t("Search"))
                                 .desired_width(f32::INFINITY),
                         );
                     },
@@ -525,7 +533,7 @@ impl RemoportApp {
     ) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if self.chip(ui, "All", filter.is_none(), false).clicked() && filter.is_some() {
+            if self.chip(ui, t("All"), filter.is_none(), false).clicked() && filter.is_some() {
                 logging::event(format_args!("Filter: all ({label})"));
                 *filter = None;
             }
@@ -539,7 +547,8 @@ impl RemoportApp {
                 ui.set_min_width(180.0);
                 if options.is_empty() {
                     ui.label(
-                        RichText::new("Nothing to filter by yet").color(self.theme.text_secondary),
+                        RichText::new(t("Nothing to filter by yet"))
+                            .color(self.theme.text_secondary),
                     );
                 }
                 for option in options {
@@ -565,7 +574,7 @@ impl RemoportApp {
         groups.sort_by_key(|g| g.to_lowercase());
         groups.dedup();
         let mut filter = self.group_filter.take();
-        self.filter_chips(ui, "group_filter", "Group", &groups, &mut filter);
+        self.filter_chips(ui, "group_filter", t("Group"), &groups, &mut filter);
         self.group_filter = filter;
     }
 
@@ -582,7 +591,7 @@ impl RemoportApp {
         self.filter_chips(
             ui,
             "workspace_filter",
-            "Workspace",
+            t("Workspace"),
             &workspaces,
             &mut filter,
         );
@@ -701,20 +710,20 @@ impl RemoportApp {
             icons::paint_logo(ui.painter(), logo);
             ui.add_space(18.0);
             ui.label(
-                RichText::new("Welcome to Remoport")
+                RichText::new(t("Welcome to Remoport"))
                     .font(fonts::medium(26.0))
                     .color(self.theme.text_primary),
             );
             ui.add_space(4.0);
             ui.label(
-                RichText::new("Your remote computers and apps, in one place.")
+                RichText::new(t("Your remote computers and apps, in one place."))
                     .size(13.5)
                     .color(self.theme.text_secondary),
             );
             ui.add_space(26.0);
 
             if ui
-                .add_sized([280.0, 38.0], self.theme.primary_button("Add a PC"))
+                .add_sized([280.0, 38.0], self.theme.primary_button(t("Add a PC")))
                 .clicked()
             {
                 self.add_edit_dialog.open_add(self.state.default_resolution);
@@ -736,14 +745,14 @@ impl RemoportApp {
             painter.text(
                 rule.center(),
                 Align2::CENTER_CENTER,
-                "or",
+                t("or"),
                 FontId::proportional(12.0),
                 self.theme.text_secondary,
             );
             ui.add_space(6.0);
 
             let subscribe = egui::Button::new(
-                RichText::new("Subscribe to a workspace").color(self.theme.text_primary),
+                RichText::new(t("Subscribe to a workspace")).color(self.theme.text_primary),
             )
             .fill(self.theme.card_bg)
             .stroke(self.theme.card_stroke());
@@ -753,7 +762,7 @@ impl RemoportApp {
 
             ui.add_space(30.0);
             ui.label(
-                RichText::new("Just once, without saving it:")
+                RichText::new(t("Just once, without saving it:"))
                     .size(12.5)
                     .color(self.theme.text_secondary),
             );
@@ -770,11 +779,11 @@ impl RemoportApp {
     fn quick_connect(&mut self, ui: &mut Ui, width: f32) {
         let field = ui.add(
             egui::TextEdit::singleline(&mut self.quick_connect_host)
-                .hint_text("Name or address of the PC")
+                .hint_text(t("Name or address of the PC"))
                 .desired_width(width),
         );
         let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        let clicked = ui.add(self.theme.primary_button("Connect")).clicked();
+        let clicked = ui.add(self.theme.primary_button(t("Connect"))).clicked();
         let host = self.quick_connect_host.trim().to_string();
         if (entered || clicked) && !host.is_empty() {
             logging::event(format_args!("Quick connect to {host}"));
@@ -811,8 +820,8 @@ impl RemoportApp {
             self.show_empty_state(
                 ui,
                 Icon::Star,
-                "No favorites yet",
-                "Open the ··· menu of a PC or an app and add it to your favorites.",
+                t("No favorites yet"),
+                t("Open the ··· menu of a PC or an app and add it to your favorites."),
                 None,
             );
             return;
@@ -825,7 +834,7 @@ impl RemoportApp {
             });
             ui.add_space(18.0);
         }
-        if !apps.is_empty() && self.section(ui, "favorites:apps", "Apps", apps.len()) {
+        if !apps.is_empty() && self.section(ui, "favorites:apps", t("Apps"), apps.len()) {
             Self::card_row(ui, |ui| {
                 for app in &apps {
                     self.show_app_card(ui, app);
@@ -852,9 +861,9 @@ impl RemoportApp {
             self.show_empty_state(
                 ui,
                 Icon::Monitor,
-                "No PCs yet",
-                "Add a PC by its name or address, or subscribe to your organization's workspace.",
-                Some(("Add a PC", EmptyAction::AddPc)),
+                t("No PCs yet"),
+                t("Add a PC by its name or address, or subscribe to your organization's workspace."),
+                Some((t("Add a PC"), EmptyAction::AddPc)),
             );
             return;
         }
@@ -880,8 +889,8 @@ impl RemoportApp {
             self.show_empty_state(
                 ui,
                 Icon::Search,
-                "No PCs match",
-                "Try another name or address, or show all groups.",
+                t("No PCs match"),
+                t("Try another name or address, or show all groups."),
                 None,
             );
             return;
@@ -897,7 +906,13 @@ impl RemoportApp {
             }
         }
         for (group, pcs) in &groups {
-            if self.section(ui, &format!("devices:{group}"), group, pcs.len()) {
+            // The default group's name is stored in English.
+            let shown = if group == "Saved PCs" {
+                t("Saved PCs")
+            } else {
+                group
+            };
+            if self.section(ui, &format!("devices:{group}"), shown, pcs.len()) {
                 match self.state.view_mode {
                     ViewMode::Grid => Self::card_row(ui, |ui| {
                         for pc in pcs {
@@ -990,7 +1005,7 @@ impl RemoportApp {
         );
         let more = ui
             .interact(more_rect, response.id.with("more"), Sense::click())
-            .on_hover_text("More actions")
+            .on_hover_text(t("More actions"))
             .on_hover_cursor(CursorIcon::PointingHand);
         if more.hovered() {
             painter.rect_filled(more_rect, Rounding::same(6.0), self.theme.nav_hover);
@@ -1019,25 +1034,28 @@ impl RemoportApp {
 
     fn pc_menu_items(&mut self, ui: &mut Ui, pc: &DeviceBookmark) {
         ui.set_min_width(200.0);
-        if ui.button("Connect").clicked() {
+        if ui.button(t("Connect")).clicked() {
             self.connect_to(pc);
             ui.close_menu();
         }
-        if ui.button("Edit…").clicked() {
+        if ui.button(t("Edit…")).clicked() {
             self.add_edit_dialog.open_edit(pc);
             ui.close_menu();
         }
         let favorite = if pc.is_favorite {
-            "Remove from favorites"
+            t("Remove from favorites")
         } else {
-            "Add to favorites"
+            t("Add to favorites")
         };
         if ui.button(favorite).clicked() {
             self.toggle_favorite(pc.id);
             ui.close_menu();
         }
         ui.separator();
-        if ui.button(RichText::new("Delete…").color(DANGER)).clicked() {
+        if ui
+            .button(RichText::new(t("Delete…")).color(DANGER))
+            .clicked()
+        {
             logging::event(format_args!(
                 "Delete requested for \"{}\" ({})",
                 pc.display_title(),
@@ -1053,25 +1071,25 @@ impl RemoportApp {
             return;
         };
         let mut decision = None;
-        egui::Window::new("Delete this PC?")
+        egui::Window::new(t("Delete this PC?"))
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.label(format!(
+                ui.label(tf(
                     "\"{}\" ({}) will be removed from Remoport, with its password if it is \
                      remembered in the keyring. The PC itself is not affected.",
-                    pc.display_title(),
-                    pc.pc_name
+                    &[&pc.display_title(), &pc.pc_name],
                 ));
                 ui.add_space(12.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let delete = egui::Button::new(RichText::new("Delete").color(Color32::WHITE))
-                        .fill(DANGER);
+                    let delete =
+                        egui::Button::new(RichText::new(t("Delete")).color(Color32::WHITE))
+                            .fill(DANGER);
                     if ui.add(delete).clicked() {
                         decision = Some(true);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(t("Cancel")).clicked() {
                         decision = Some(false);
                     }
                 });
@@ -1109,10 +1127,10 @@ impl RemoportApp {
             .spacing([18.0, 10.0])
             .show(ui, |ui| {
                 for header in [
-                    "Name",
-                    "Name or address",
-                    "Resolution",
-                    "Last connected",
+                    t("Name"),
+                    t("Name or address"),
+                    t("Resolution"),
+                    t("Last connected"),
                     "",
                 ] {
                     ui.label(RichText::new(header).color(self.theme.text_secondary));
@@ -1126,22 +1144,22 @@ impl RemoportApp {
                     ui.label(
                         pc.last_connected
                             .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-                            .unwrap_or_else(|| "Never".to_string()),
+                            .unwrap_or_else(|| t("Never").to_string()),
                     );
                     ui.horizontal(|ui| {
-                        if ui.add(self.theme.primary_button("Connect")).clicked() {
+                        if ui.add(self.theme.primary_button(t("Connect"))).clicked() {
                             connect_target = Some(pc.clone());
                         }
-                        if ui.button("Edit").clicked() {
+                        if ui.button(t("Edit")).clicked() {
                             edit_target = Some(pc.clone());
                         }
                         let star = if pc.is_favorite { "★" } else { "☆" };
                         if ui
                             .button(star)
                             .on_hover_text(if pc.is_favorite {
-                                "Remove from favorites"
+                                t("Remove from favorites")
                             } else {
-                                "Add to favorites"
+                                t("Add to favorites")
                             })
                             .clicked()
                         {
@@ -1199,9 +1217,9 @@ impl RemoportApp {
             self.show_empty_state(
                 ui,
                 Icon::Window,
-                "No apps yet",
-                "Subscribe to your organization's workspace to open the apps it publishes as windows of their own.",
-                Some(("Subscribe to a workspace", EmptyAction::AddWorkspace)),
+                t("No apps yet"),
+                t("Subscribe to your organization's workspace to open the apps it publishes as windows of their own."),
+                Some((t("Subscribe to a workspace"), EmptyAction::AddWorkspace)),
             );
             return;
         }
@@ -1223,8 +1241,8 @@ impl RemoportApp {
             self.show_empty_state(
                 ui,
                 Icon::Search,
-                "No apps match",
-                "Try another name, or show all workspaces.",
+                t("No apps match"),
+                t("Try another name, or show all workspaces."),
                 None,
             );
             return;
@@ -1309,16 +1327,16 @@ impl RemoportApp {
 
         let id = app.id;
         let favorite = if app.is_favorite {
-            "Remove from favorites"
+            t("Remove from favorites")
         } else {
-            "Add to favorites"
+            t("Add to favorites")
         };
         let response = response.on_hover_cursor(CursorIcon::PointingHand);
         if response.clicked() {
             self.open_app(app);
         }
         response.context_menu(|ui| {
-            if ui.button("Open").clicked() {
+            if ui.button(t("Open")).clicked() {
                 self.open_app(app);
                 ui.close_menu();
             }
@@ -1358,13 +1376,13 @@ impl RemoportApp {
 
     /// How Remoport protects a connection, and the certificates the user trusted.
     fn show_security_settings(&mut self, ui: &mut Ui) {
-        self.settings_heading(ui, "Security");
+        self.settings_heading(ui, t("Security"));
         for line in [
-            "Before your password is used, Remoport confirms the PC's identity: a certificate \
-             from an authority this computer trusts, or one you checked and trusted yourself.",
-            "Network Level Authentication is required, unless you allow a PC to sign in without \
-             it in its settings.",
-            "Passwords are remembered only if you ask, and only in the system keyring.",
+            t("Before your password is used, Remoport confirms the PC's identity: a certificate \
+             from an authority this computer trusts, or one you checked and trusted yourself."),
+            t("Network Level Authentication is required, unless you allow a PC to sign in without \
+             it in its settings."),
+            t("Passwords are remembered only if you ask, and only in the system keyring."),
         ] {
             ui.label(RichText::new(line).color(self.theme.text_secondary));
         }
@@ -1375,12 +1393,12 @@ impl RemoportApp {
         let servers = store.entries();
         if servers.is_empty() {
             ui.label(
-                RichText::new("You have not trusted any PC's certificate yourself.")
+                RichText::new(t("You have not trusted any PC's certificate yourself."))
                     .color(self.theme.text_secondary),
             );
             return;
         }
-        ui.label(RichText::new("Certificates you trusted").color(self.theme.text_primary));
+        ui.label(RichText::new(t("Certificates you trusted")).color(self.theme.text_primary));
         ui.add_space(4.0);
         let mut forget = None;
         egui::Grid::new("trusted_servers")
@@ -1400,8 +1418,8 @@ impl RemoportApp {
                             .color(self.theme.text_secondary),
                     );
                     if ui
-                        .button("Forget")
-                        .on_hover_text("The next connection asks again")
+                        .button(t("Forget"))
+                        .on_hover_text(t("The next connection asks again"))
                         .clicked()
                     {
                         forget = Some(server.server.clone());
@@ -1420,11 +1438,14 @@ impl RemoportApp {
     }
 
     fn show_settings(&mut self, ui: &mut Ui) {
-        self.settings_heading(ui, "Appearance");
+        self.settings_heading(ui, t("Appearance"));
         let mut appearance = self.theme.appearance;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            for (option, label) in [(Appearance::Light, "Light"), (Appearance::Dark, "Dark")] {
+            for (option, label) in [
+                (Appearance::Light, t("Light")),
+                (Appearance::Dark, t("Dark")),
+            ] {
                 if self.chip(ui, label, appearance == option, false).clicked() {
                     appearance = option;
                 }
@@ -1438,10 +1459,10 @@ impl RemoportApp {
         }
 
         ui.add_space(26.0);
-        self.settings_heading(ui, "New PCs");
+        self.settings_heading(ui, t("New PCs"));
         let resolution = self.state.default_resolution;
         egui::ComboBox::from_label(
-            RichText::new("Resolution for PCs you add").color(self.theme.text_secondary),
+            RichText::new(t("Resolution for PCs you add")).color(self.theme.text_secondary),
         )
         .selected_text(self.state.default_resolution.display_label())
         .show_ui(ui, |ui| {
@@ -1466,19 +1487,19 @@ impl RemoportApp {
         }
 
         ui.add_space(26.0);
-        self.settings_heading(ui, "Your data");
+        self.settings_heading(ui, t("Your data"));
         let location = state_path()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "nowhere (no home folder)".to_string());
+            .unwrap_or_else(|| t("nowhere (no home folder)").to_string());
         ui.label(
-            RichText::new(format!("Your PCs and settings are saved in {location}"))
+            RichText::new(tf("Your PCs and settings are saved in {}", &[&location]))
                 .color(self.theme.text_secondary),
         );
         let log = logging::log_path()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "standard error only".to_string());
+            .unwrap_or_else(|| t("standard error only").to_string());
         ui.label(
-            RichText::new(format!("What you do in Remoport is logged to {log}"))
+            RichText::new(tf("What you do in Remoport is logged to {}", &[&log]))
                 .color(self.theme.text_secondary),
         );
 
@@ -1486,23 +1507,26 @@ impl RemoportApp {
         self.show_security_settings(ui);
 
         ui.add_space(26.0);
-        self.settings_heading(ui, "About Remoport");
+        self.settings_heading(ui, t("About Remoport"));
         for line in [
             format!("Remoport {}", env!("CARGO_PKG_VERSION")),
-            "Your remote computers and apps, from Linux.".to_string(),
-            "Free software under the GNU GPL, version 3 or later.".to_string(),
-            "Its RDP engine is built on IronRDP, with parts from RustConn by Anton Isaiev."
+            t("Your remote computers and apps, from Linux.").to_string(),
+            t("Free software under the GNU GPL, version 3 or later.").to_string(),
+            t("Its RDP engine is built on IronRDP, with parts from RustConn by Anton Isaiev.")
                 .to_string(),
         ] {
             ui.label(RichText::new(line).color(self.theme.text_secondary));
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.hyperlink_to("Source code", REPO_URL).clicked() {
+            if ui.hyperlink_to(t("Source code"), REPO_URL).clicked() {
                 logging::event("Opened the source code page");
             }
             ui.label(RichText::new("·").color(self.theme.text_secondary));
-            if ui.hyperlink_to("Report a problem", FEEDBACK_URL).clicked() {
+            if ui
+                .hyperlink_to(t("Report a problem"), FEEDBACK_URL)
+                .clicked()
+            {
                 logging::event("Opened the feedback page");
             }
         });

@@ -5,6 +5,7 @@
 //! has them, and bring a dropped connection back to the same session.
 
 use crate::credentials::{self, Outcome, Pending};
+use crate::i18n::{t, tf};
 use crate::keymap;
 use crate::logging;
 use crate::model::{self, AudioPlaybackMode, DeviceBookmark};
@@ -260,8 +261,8 @@ impl ActiveSession {
         if let Some(app) = self.open_app.clone() {
             self.message(
                 ui,
-                &format!("\"{app}\" would open here"),
-                "Apps published by workspaces are not available yet.",
+                &tf("\"{}\" would open here", &[&app]),
+                t("Apps published by workspaces are not available yet."),
             );
             return;
         }
@@ -283,8 +284,8 @@ impl ActiveSession {
                 self.measure_canvas(ui);
                 self.message(
                     ui,
-                    &format!("Connecting to {}…", self.bookmark.pc_name),
-                    "Checking the PC's identity before signing in.",
+                    &tf("Connecting to {}…", &[&self.bookmark.pc_name]),
+                    t("Checking the PC's identity before signing in."),
                 );
             }
             Phase::VerifyIdentity { .. } => self.identity_question(ui, theme),
@@ -311,7 +312,7 @@ impl ActiveSession {
         ui.horizontal(|ui| {
             ui.label(format!("🖥 {}", self.bookmark.display_title()));
             ui.separator();
-            ui.label(format!("Host: {}", self.bookmark.pc_name));
+            ui.label(tf("Host: {}", &[&self.bookmark.pc_name]));
             ui.separator();
             ui.label(self.status());
 
@@ -319,9 +320,9 @@ impl ActiveSession {
                 let connected = matches!(self.phase, Phase::Connected);
                 if ui
                     .button(if connected {
-                        "❌ Disconnect"
+                        t("❌ Disconnect")
                     } else {
-                        "❌ Close"
+                        t("❌ Close")
                     })
                     .clicked()
                 {
@@ -339,16 +340,16 @@ impl ActiveSession {
                 if connected && self.microphone_live {
                     let muted = self.microphone_muted.load(Ordering::Relaxed);
                     let label = if muted {
-                        RichText::new("● Microphone muted")
+                        RichText::new(t("Microphone muted"))
                     } else {
-                        RichText::new("● Microphone on").color(DANGER)
+                        RichText::new(t("Microphone on")).color(DANGER)
                     };
                     if ui
                         .button(label)
                         .on_hover_text(if muted {
-                            "The PC gets silence. Click to unmute."
+                            t("The PC gets silence. Click to unmute.")
                         } else {
-                            "The PC is using your microphone. Click to mute."
+                            t("The PC is using your microphone. Click to mute.")
                         })
                         .clicked()
                     {
@@ -362,8 +363,8 @@ impl ActiveSession {
                 }
                 if connected
                     && ui
-                        .button("⛶ Full screen")
-                        .on_hover_text("Ctrl+Alt+Enter switches full screen on and off")
+                        .button(t("⛶ Full screen"))
+                        .on_hover_text(t("Ctrl+Alt+Enter switches full screen on and off"))
                         .clicked()
                 {
                     ui.ctx()
@@ -371,7 +372,7 @@ impl ActiveSession {
                     self.refocus = true;
                 }
                 if connected {
-                    ui.menu_button("⌨ Keys", |ui| {
+                    ui.menu_button(t("⌨ Keys"), |ui| {
                         if ui.button("Ctrl+Alt+Del").clicked() {
                             logging::event("Sent Ctrl+Alt+Del");
                             self.send(Command::CtrlAltDel);
@@ -379,7 +380,7 @@ impl ActiveSession {
                             ui.close_menu();
                         }
                         for (label, keys) in keymap::COMBINATIONS {
-                            if ui.button(*label).clicked() {
+                            if ui.button(t(label)).clicked() {
                                 logging::event(format_args!("Sent {label}"));
                                 for (key, pressed) in keymap::strokes(keys) {
                                     self.send_key(key, pressed);
@@ -390,10 +391,8 @@ impl ActiveSession {
                         }
                     })
                     .response
-                    .on_hover_text(
-                        "Key combinations this computer keeps for itself, \
-                         or that cannot be typed here",
-                    );
+                    .on_hover_text(t("Key combinations this computer keeps for itself, \
+                         or that cannot be typed here"));
                 }
             });
         });
@@ -401,9 +400,9 @@ impl ActiveSession {
 
     fn status(&self) -> String {
         match self.phase {
-            Phase::SignIn => "Sign in".to_string(),
-            Phase::Connecting => "Connecting…".to_string(),
-            Phase::VerifyIdentity { .. } => "Waiting for your decision".to_string(),
+            Phase::SignIn => t("Sign in").to_string(),
+            Phase::Connecting => t("Connecting…").to_string(),
+            Phase::VerifyIdentity { .. } => t("Waiting for your decision").to_string(),
             Phase::Connected => {
                 let size = self
                     .screen
@@ -416,16 +415,16 @@ impl ActiveSession {
                     .map(|g| format!(" · {g}"))
                     .unwrap_or_default();
                 let screens = if self.screens > 1 {
-                    format!(" · {} screens", self.screens)
+                    tf(" · {} screens", &[&self.screens])
                 } else {
                     String::new()
                 };
-                format!("Connected{size}{screens}{graphics}")
+                format!("{}{size}{screens}{graphics}", t("Connected"))
             }
             Phase::Reconnecting { attempt, .. } => {
-                format!("Reconnecting… ({attempt} of {MAX_RECONNECTS})")
+                tf("Reconnecting… ({} of {})", &[&attempt, &MAX_RECONNECTS])
             }
-            Phase::Ended(_) => "Disconnected".to_string(),
+            Phase::Ended(_) => t("Disconnected").to_string(),
         }
     }
 
@@ -451,7 +450,7 @@ impl ActiveSession {
                     self.bookmark.pc_name
                 ));
                 self.notification_msg =
-                    Some("Your password is remembered in the system keyring.".to_string());
+                    Some(t("Your password is remembered in the system keyring.").to_string());
             }
             Outcome::Forgotten => {
                 logging::event(format_args!(
@@ -462,7 +461,7 @@ impl ActiveSession {
             Outcome::Failed(error) => {
                 logging::event(format_args!("Keyring unavailable: {error}"));
                 self.notification_msg = Some(
-                    "The system keyring is not available, so no password is remembered."
+                    t("The system keyring is not available, so no password is remembered.")
                         .to_string(),
                 );
             }
@@ -476,7 +475,7 @@ impl ActiveSession {
         ui.vertical_centered(|ui| {
             ui.add_space(70.0);
             ui.label(
-                RichText::new(format!("Sign in to {}", self.bookmark.display_title()))
+                RichText::new(tf("Sign in to {}", &[&self.bookmark.display_title()]))
                     .font(crate::fonts::medium(22.0))
                     .color(theme.text_primary),
             );
@@ -493,21 +492,21 @@ impl ActiveSession {
                     .num_columns(2)
                     .spacing([12.0, 10.0])
                     .show(ui, |ui| {
-                        ui.label("User name");
+                        ui.label(t("User name"));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.username)
-                                .hint_text("user, DOMAIN\\user or user@domain")
+                                .hint_text(t("user, DOMAIN\\user or user@domain"))
                                 .desired_width(280.0),
                         );
                         ui.end_row();
-                        ui.label("Password");
+                        ui.label(t("Password"));
                         if self.saved_password.is_some() {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new("🔑 Saved in your keyring")
+                                    RichText::new(t("🔑 Saved in your keyring"))
                                         .color(theme.text_secondary),
                                 );
-                                forget = ui.small_button("Forget").clicked();
+                                forget = ui.small_button(t("Forget")).clicked();
                             });
                         } else {
                             let field = ui.add(
@@ -521,11 +520,11 @@ impl ActiveSession {
                         ui.end_row();
                         if self.saved && self.saved_password.is_none() {
                             ui.label("");
-                            ui.checkbox(&mut self.remember, "Remember in the system keyring");
+                            ui.checkbox(&mut self.remember, t("Remember in the system keyring"));
                             ui.end_row();
                         }
                         if self.gateway_account().is_some() {
-                            ui.label("Gateway password");
+                            ui.label(t("Gateway password"));
                             let field = ui.add(
                                 egui::TextEdit::singleline(&mut *self.gateway_password)
                                     .password(true)
@@ -549,16 +548,18 @@ impl ActiveSession {
             }
             ui.add_space(16.0);
             submit |= ui
-                .add_sized([200.0, 34.0], theme.primary_button("Connect"))
+                .add_sized([200.0, 34.0], theme.primary_button(t("Connect")))
                 .clicked();
             if submit {
                 self.connect();
             }
             ui.add_space(8.0);
             ui.label(
-                RichText::new("Remoport confirms the PC's identity before your password is used.")
-                    .size(12.0)
-                    .color(theme.text_secondary),
+                RichText::new(t(
+                    "Remoport confirms the PC's identity before your password is used.",
+                ))
+                .size(12.0)
+                .color(theme.text_secondary),
             );
         });
     }
@@ -592,7 +593,7 @@ impl ActiveSession {
         let Some(trust_store) = model::trust_store_path().map(TrustStore::new) else {
             self.forget_session();
             self.phase = Phase::Ended(
-                "Remoport has no folder to keep trusted certificates in (HOME is not set)."
+                t("Remoport has no folder to keep trusted certificates in (HOME is not set).")
                     .to_string(),
             );
             return false;
@@ -866,10 +867,10 @@ impl ActiveSession {
                 }
                 logging::event("Gave up reconnecting");
                 self.forget_session();
-                self.phase = Phase::Ended(format!(
-                    "The connection to {} was lost and could not be brought back after \
-                     {MAX_RECONNECTS} attempts ({error}).",
-                    self.bookmark.pc_name
+                self.phase = Phase::Ended(tf(
+                    "The connection to {} was lost and could not be brought back after {} \
+                     attempts ({}).",
+                    &[&self.bookmark.pc_name, &MAX_RECONNECTS, error],
                 ));
                 return;
             }
@@ -879,7 +880,7 @@ impl ActiveSession {
             None => {
                 logging::event("Session ended");
                 if !matches!(self.phase, Phase::Ended(_)) {
-                    self.phase = Phase::Ended("The session ended.".to_string());
+                    self.phase = Phase::Ended(t("The session ended.").to_string());
                 }
             }
             Some(error) => {
@@ -887,9 +888,9 @@ impl ActiveSession {
                 match error {
                     Error::Authentication(_) => {
                         let message = if self.used_saved_password {
-                            "The PC refused the saved password. Type it again."
+                            t("The PC refused the saved password. Type it again.")
                         } else {
-                            "The PC refused the sign-in. Check the user name and password."
+                            t("The PC refused the sign-in. Check the user name and password.")
                         };
                         if self.used_saved_password {
                             self.saved_password = None;
@@ -898,22 +899,24 @@ impl ActiveSession {
                         self.phase = Phase::SignIn;
                     }
                     Error::NlaUnavailable => {
-                        self.phase = Phase::Ended(format!(
+                        self.phase = Phase::Ended(tf(
                             "{} does not offer Network Level Authentication, so it would show \
                              its sign-in screen before checking who you are. Remoport does not \
                              connect that way unless you allow it for this PC (Edit → General), \
                              which is less secure.",
-                            self.bookmark.pc_name
+                            &[&self.bookmark.pc_name],
                         ));
                     }
                     Error::IdentityRejected => {
                         self.phase = Phase::Ended(
-                            "You chose not to connect: the PC's identity was not confirmed. \
-                             Nothing was sent to it."
-                                .to_string(),
+                            t(
+                                "You chose not to connect: the PC's identity was not confirmed. \
+                             Nothing was sent to it.",
+                            )
+                            .to_string(),
                         );
                     }
-                    other => self.phase = Phase::Ended(capitalize(&other.to_string())),
+                    other => self.phase = Phase::Ended(explain(&other)),
                 }
             }
         }
@@ -967,10 +970,10 @@ impl ActiveSession {
             ui.add_space(40.0);
             ui.set_max_width(620.0);
             let (title, color) = if changed {
-                ("Warning: this PC's certificate changed", DANGER)
+                (t("Warning: this PC's certificate changed"), DANGER)
             } else {
                 (
-                    "Remoport cannot confirm this PC's identity",
+                    t("Remoport cannot confirm this PC's identity"),
                     theme.text_primary,
                 )
             };
@@ -981,18 +984,18 @@ impl ActiveSession {
             );
             ui.add_space(10.0);
             let explanation = if changed {
-                format!(
+                tf(
                     "{} presents a different certificate from the one you trusted. Someone may \
                      be intercepting the connection to capture your password. Continue only if \
                      your administrator confirms the certificate was replaced.",
-                    info.host
+                    &[&info.host],
                 )
             } else {
-                format!(
+                tf(
                     "Remoport could not verify {}: {}. If this is your PC, compare the \
                      fingerprint below with the one your administrator gives you before you \
                      trust it. Nothing has been sent to it yet.",
-                    info.host, info.why_unverified
+                    &[&info.host, &info.why_unverified],
                 )
             };
             ui.label(RichText::new(explanation).color(theme.text_secondary));
@@ -1018,19 +1021,19 @@ impl ActiveSession {
                                 ui.end_row();
                             };
                             row(ui, "PC", &format!("{}:{}", info.host, info.port), false);
-                            row(ui, "Certificate for", &info.subject, false);
-                            row(ui, "Issued by", &info.issuer, false);
+                            row(ui, t("Certificate for"), &info.subject, false);
+                            row(ui, t("Issued by"), &info.issuer, false);
                             row(
                                 ui,
-                                "Valid",
-                                &format!("{} to {}", info.valid_from, info.valid_until),
+                                t("Valid"),
+                                &tf("{} to {}", &[&info.valid_from, &info.valid_until]),
                                 false,
                             );
                             if let IdentityProblem::Changed { previous_sha256 } = &problem {
-                                row(ui, "You trusted (SHA-256)", previous_sha256, true);
-                                row(ui, "Now presented", &info.sha256, true);
+                                row(ui, t("You trusted (SHA-256)"), previous_sha256, true);
+                                row(ui, t("Now presented"), &info.sha256, true);
                             } else {
-                                row(ui, "Fingerprint (SHA-256)", &info.sha256, true);
+                                row(ui, t("Fingerprint (SHA-256)"), &info.sha256, true);
                             }
                         });
                 });
@@ -1039,7 +1042,7 @@ impl ActiveSession {
             if changed {
                 ui.checkbox(
                     replacement_confirmed,
-                    "My administrator confirmed this certificate was replaced",
+                    t("My administrator confirmed this certificate was replaced"),
                 );
                 ui.add_space(10.0);
             }
@@ -1047,18 +1050,18 @@ impl ActiveSession {
                 let width = 2.0 * 220.0 + ui.spacing().item_spacing.x;
                 ui.add_space((ui.available_width() - width).max(0.0) / 2.0);
                 if ui
-                    .add_sized([220.0, 34.0], theme.primary_button("Don't connect"))
+                    .add_sized([220.0, 34.0], theme.primary_button(t("Don't connect")))
                     .clicked()
                 {
                     decision = Some(false);
                 }
                 let trust = if changed {
                     egui::Button::new(
-                        RichText::new("Trust the new certificate").color(Color32::WHITE),
+                        RichText::new(t("Trust the new certificate")).color(Color32::WHITE),
                     )
                     .fill(DANGER)
                 } else {
-                    egui::Button::new("Trust and connect")
+                    egui::Button::new(t("Trust and connect"))
                 };
                 let enabled = !changed || *replacement_confirmed;
                 if ui
@@ -1099,7 +1102,10 @@ impl ActiveSession {
         let ctx = ui.ctx().clone();
         let mut focus = self.remote_screen(ui, 0);
         for index in 1..self.screens {
-            let title = format!("{} · screen {}", self.bookmark.display_title(), index + 1);
+            let title = tf(
+                "{} · screen {}",
+                &[&self.bookmark.display_title(), &(index + 1)],
+            );
             let builder = egui::ViewportBuilder::default()
                 .with_title(title)
                 .with_inner_size([960.0, 600.0]);
@@ -1184,7 +1190,7 @@ impl ActiveSession {
             ui.painter().text(
                 rect.center_top() + vec2(0.0, 12.0),
                 Align2::CENTER_TOP,
-                "Move this window to its screen, then press Ctrl+Alt+Enter",
+                t("Move this window to its screen, then press Ctrl+Alt+Enter"),
                 FontId::proportional(13.0),
                 Color32::from_white_alpha(210),
             );
@@ -1212,7 +1218,7 @@ impl ActiveSession {
             ui.painter().text(
                 rect.center_bottom() - vec2(0.0, 16.0),
                 Align2::CENTER_BOTTOM,
-                "Click the remote screen to type into it",
+                t("Click the remote screen to type into it"),
                 FontId::proportional(12.0),
                 Color32::from_white_alpha(160),
             );
@@ -1412,26 +1418,27 @@ impl ActiveSession {
         ui.vertical_centered(|ui| {
             ui.add_space(110.0);
             ui.label(
-                RichText::new(format!("Reconnecting to {}…", self.bookmark.pc_name))
+                RichText::new(tf("Reconnecting to {}…", &[&self.bookmark.pc_name]))
                     .font(crate::fonts::medium(18.0)),
             );
             ui.add_space(6.0);
             ui.label(
-                RichText::new(format!(
-                    "The connection dropped. Attempt {attempt} of {MAX_RECONNECTS}: your \
-                     session on the PC normally stays open and comes back as you left it."
+                RichText::new(tf(
+                    "The connection dropped. Attempt {} of {}: your session on the PC normally \
+                     stays open and comes back as you left it.",
+                    &[&attempt, &MAX_RECONNECTS],
                 ))
                 .weak(),
             );
             ui.add_space(18.0);
             if ui
-                .add_sized([180.0, 34.0], egui::Button::new("Stop reconnecting"))
+                .add_sized([180.0, 34.0], egui::Button::new(t("Stop reconnecting")))
                 .clicked()
             {
                 logging::event("Stopped reconnecting");
                 self.reset_session();
                 self.forget_session();
-                self.phase = Phase::Ended("You stopped reconnecting.".to_string());
+                self.phase = Phase::Ended(t("You stopped reconnecting.").to_string());
             }
         });
     }
@@ -1452,7 +1459,7 @@ impl ActiveSession {
             ui.add_space(90.0);
             ui.set_max_width(620.0);
             ui.label(
-                RichText::new("The session ended")
+                RichText::new(t("The session ended"))
                     .font(crate::fonts::medium(20.0))
                     .color(theme.text_primary),
             );
@@ -1460,7 +1467,7 @@ impl ActiveSession {
             ui.add(egui::Label::new(RichText::new(reason).color(theme.text_secondary)).wrap());
             ui.add_space(18.0);
             if ui
-                .add_sized([180.0, 34.0], theme.primary_button("Try again"))
+                .add_sized([180.0, 34.0], theme.primary_button(t("Try again")))
                 .clicked()
             {
                 logging::event("Try again");
@@ -1512,6 +1519,26 @@ fn reconnect_delay(attempt: u32) -> Duration {
         3 => 4,
         _ => 5,
     })
+}
+
+/// What an engine failure means. The engine's own words carry the detail,
+/// in English; in Spanish a lead-in says what happened.
+fn explain(error: &Error) -> String {
+    let detail = error.to_string();
+    if !crate::i18n::spanish() {
+        return capitalize(&detail);
+    }
+    match error {
+        Error::Unreachable(_) => format!("No se pudo llegar al PC: {detail}"),
+        Error::Timeout(_) => format!("El PC tardó demasiado en responder: {detail}"),
+        Error::Gateway(_) => format!("El RD Gateway no abrió el camino al PC: {detail}"),
+        Error::ConnectionLost(_) => format!("Se perdió la conexión: {detail}"),
+        Error::BrokerRedirect => {
+            "El PC envió la sesión a otro servidor, y aún no se admiten los agentes de conexión."
+                .to_string()
+        }
+        _ => format!("La conexión falló: {detail}"),
+    }
 }
 
 fn capitalize(text: &str) -> String {

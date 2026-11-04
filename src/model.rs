@@ -1,3 +1,4 @@
+use crate::i18n::{t, tf};
 use crate::theme::Appearance;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -41,11 +42,11 @@ pub enum ResolutionOption {
 impl ResolutionOption {
     pub fn display_label(&self) -> String {
         match self {
-            Self::Native => "Default for this display".to_string(),
+            Self::Native => t("Default for this display").to_string(),
             Self::Fhd1080p => "1920 x 1080 (1080p)".to_string(),
             Self::Qhd1440p => "2560 x 1440 (1440p)".to_string(),
             Self::Uhd4k => "3840 x 2160 (4K UHD)".to_string(),
-            Self::Custom(w, h) => format!("{} x {} (Custom)", w, h),
+            Self::Custom(w, h) => tf("{} x {} (Custom)", &[w, h]),
         }
     }
 }

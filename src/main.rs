@@ -3,6 +3,7 @@ mod audio;
 mod credentials;
 mod dialogs;
 mod fonts;
+mod i18n;
 mod icons;
 mod keymap;
 mod logging;

@@ -1418,11 +1418,19 @@ impl ActiveSession {
                     key,
                     physical_key,
                     pressed,
+                    repeat,
                     modifiers,
-                    ..
                 } if focused => {
                     // Modifiers first: a key and its Ctrl can land in one frame.
                     self.sync_modifiers(modifiers);
+                    // Reserved combinations only: what is typed is never logged.
+                    if pressed && !repeat && modifiers.alt {
+                        match physical_key.unwrap_or(key) {
+                            egui::Key::Tab => logging::event("Sent Alt+Tab"),
+                            egui::Key::F4 => logging::event("Sent Alt+F4"),
+                            _ => {}
+                        }
+                    }
                     if let Some(code) = keymap::scancode(physical_key.unwrap_or(key)) {
                         let strokes =
                             strokes_for(&mut self.keys_down, code, pressed, modifiers.ctrl);

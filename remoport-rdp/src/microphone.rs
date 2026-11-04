@@ -39,6 +39,12 @@ pub trait SoundInput: Send {
 pub struct MicrophonePackets(Arc<Mutex<Option<AudioPacketSink>>>);
 
 impl MicrophonePackets {
+    /// Packets that go nowhere, as after the PC closes the microphone.
+    #[must_use]
+    pub fn detached() -> Self {
+        Self(Arc::new(Mutex::new(None)))
+    }
+
     pub fn send(&self, packet: Vec<u8>) {
         if let Ok(mut sink) = self.0.lock()
             && let Some(sink) = sink.as_mut()

@@ -219,7 +219,8 @@ impl SoundInput for Microphone {
         let thread = std::thread::Builder::new()
             .name("remoport-microphone".to_string())
             .spawn(move || {
-                let builder = PacketBuilder::new(packet_bytes, packets, muted);
+                let samples_per_second = u64::from(rate) * u64::from(channels);
+                let builder = PacketBuilder::new(packet_bytes, packets, muted, samples_per_second);
                 match capture(rate, channels, builder) {
                     Ok(stream) => {
                         let _ = started.send(true);
@@ -264,23 +265,44 @@ struct PacketBuilder {
     packet_bytes: usize,
     packets: MicrophonePackets,
     muted: Arc<AtomicBool>,
+    samples_per_second: u64,
+    /// How much was captured and how loud, for the log: never the sound.
+    samples: u64,
+    peak: u16,
 }
 
 impl PacketBuilder {
-    fn new(packet_bytes: usize, packets: MicrophonePackets, muted: Arc<AtomicBool>) -> Self {
+    fn new(
+        packet_bytes: usize,
+        packets: MicrophonePackets,
+        muted: Arc<AtomicBool>,
+        samples_per_second: u64,
+    ) -> Self {
         let packet_bytes = packet_bytes.clamp(2, 1 << 20);
         Self {
             pending: Vec::with_capacity(packet_bytes * 2),
             packet_bytes,
             packets,
             muted,
+            samples_per_second,
+            samples: 0,
+            peak: 0,
         }
+    }
+
+    /// What was captured, for the log: a second count and the loudest moment.
+    fn summary(&self) -> String {
+        let seconds = self.samples as f64 / self.samples_per_second.max(1) as f64;
+        let loudest = u32::from(self.peak) * 100 / 32768;
+        format!("Microphone: {seconds:.1} s captured, loudest {loudest}%")
     }
 
     fn push(&mut self, samples: impl IntoIterator<Item = i16>) {
         let muted = self.muted.load(Ordering::Relaxed);
         for sample in samples {
             let sample = if muted { 0 } else { sample };
+            self.samples += 1;
+            self.peak = self.peak.max(sample.unsigned_abs());
             self.pending.extend_from_slice(&sample.to_le_bytes());
         }
         while self.pending.len() >= self.packet_bytes {
@@ -288,6 +310,12 @@ impl PacketBuilder {
             self.packets
                 .send(std::mem::replace(&mut self.pending, rest));
         }
+    }
+}
+
+impl Drop for PacketBuilder {
+    fn drop(&mut self) {
+        logging::event(self.summary());
     }
 }
 
@@ -336,6 +364,26 @@ fn capture(rate: u32, channels: u16, builder: PacketBuilder) -> Result<cpal::Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_log_says_how_much_sound_and_how_loud_never_the_sound() {
+        let muted = Arc::new(AtomicBool::new(false));
+        let mut builder = PacketBuilder {
+            pending: Vec::new(),
+            packet_bytes: 1 << 20,
+            packets: MicrophonePackets::detached(),
+            muted: Arc::clone(&muted),
+            samples_per_second: 4,
+            samples: 0,
+            peak: 0,
+        };
+        builder.push([100, -16384, 200, 300]);
+        assert_eq!(builder.summary(), "Microphone: 1.0 s captured, loudest 50%");
+        // Muted, the PC gets silence, and the log counts it as silence.
+        muted.store(true, Ordering::Relaxed);
+        builder.push([32767; 4]);
+        assert_eq!(builder.summary(), "Microphone: 2.0 s captured, loudest 50%");
+    }
 
     #[test]
     fn the_buffer_keeps_only_the_latest_sound() {

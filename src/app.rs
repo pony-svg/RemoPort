@@ -120,6 +120,9 @@ impl RemoportApp {
             if disconnect {
                 // The session logs how it ended; nothing to add here.
                 self.active_session = None;
+                // Full screen belongs to the session: the app behind it has no
+                // bar, and so no way out of it.
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
             }
         } else {
             egui::SidePanel::left("rail")

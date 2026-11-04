@@ -124,6 +124,15 @@ fn scancode(evdev: u32) -> Option<Scancode> {
     }
 }
 
+/// A key's name for the log.
+fn name(code: Scancode) -> &'static str {
+    match code {
+        keymap::MENU => "the Menu key",
+        keymap::PRINT_SCREEN => "Print Screen",
+        _ => "the Windows key",
+    }
+}
+
 struct State {
     commander: Commander,
     active: Arc<AtomicBool>,
@@ -268,9 +277,15 @@ impl Dispatch<WlKeyboard, ()> for State {
                 };
                 let pressed = key_state == wl_keyboard::KeyState::Pressed;
                 if pressed && state.active.load(Ordering::Relaxed) {
+                    logging::event(format_args!("Sent {}", name(code)));
                     state.held.push(code);
                     state.send(code, true);
-                } else if !pressed && state.held.contains(&code) {
+                } else if pressed {
+                    logging::event(format_args!(
+                        "{} not sent: click the remote screen to give it the keyboard",
+                        name(code)
+                    ));
+                } else if state.held.contains(&code) {
                     state.held.retain(|held| *held != code);
                     state.send(code, false);
                 }

@@ -34,6 +34,9 @@ const MAX_SIDE: u16 = 8192;
 /// Limit for each step of the connection; the user's own decisions aside.
 const STEP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long full screen says how to leave it, since the bar is hidden there.
+const FULLSCREEN_HINT: Duration = Duration::from_secs(5);
+
 /// Attempts to bring a dropped connection back before giving up.
 const MAX_RECONNECTS: u32 = 20;
 
@@ -183,6 +186,8 @@ pub struct ActiveSession {
     microphone_muted: Arc<AtomicBool>,
     /// Give the remote screen the keyboard back after a menu took it.
     refocus: bool,
+    /// Until when full screen says how to leave it.
+    fullscreen_hint_until: Option<Instant>,
     /// Windows the session spans, one per screen.
     screens: usize,
     /// Each window's drawing area in physical pixels, the main one first.
@@ -233,6 +238,7 @@ impl ActiveSession {
             microphone_live: false,
             microphone_muted: Arc::new(AtomicBool::new(false)),
             refocus: false,
+            fullscreen_hint_until: None,
             screens,
             screen_px: vec![(1280, 720); screens],
             remote_monitors: Vec::new(),
@@ -369,6 +375,8 @@ impl ActiveSession {
                 {
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+                    logging::event("Full screen");
+                    self.fullscreen_hint_until = Some(Instant::now() + FULLSCREEN_HINT);
                     self.refocus = true;
                 }
                 if connected {
@@ -1186,6 +1194,27 @@ impl ActiveSession {
         ui.painter().image(texture, image, uv, Color32::WHITE);
 
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        if fullscreen
+            && self
+                .fullscreen_hint_until
+                .is_some_and(|until| Instant::now() < until)
+        {
+            // On a dark plate: the remote desktop can be any color.
+            let painter = ui.painter();
+            let text = painter.layout_no_wrap(
+                t("Ctrl+Alt+Enter leaves full screen").to_string(),
+                FontId::proportional(14.0),
+                Color32::WHITE,
+            );
+            let at =
+                Align2::CENTER_TOP.anchor_size(rect.center_top() + vec2(0.0, 16.0), text.size());
+            painter.rect_filled(
+                at.expand(8.0),
+                Rounding::same(6.0),
+                Color32::from_black_alpha(190),
+            );
+            painter.galley(at.min, text, Color32::WHITE);
+        }
         if index > 0 && !fullscreen {
             ui.painter().text(
                 rect.center_top() + vec2(0.0, 12.0),
@@ -1288,6 +1317,9 @@ impl ActiveSession {
                     ..
                 } if focused && modifiers.ctrl && modifiers.alt => {
                     if pressed {
+                        if !fullscreen {
+                            self.fullscreen_hint_until = Some(Instant::now() + FULLSCREEN_HINT);
+                        }
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
                         logging::event(if fullscreen {
                             "Left full screen"

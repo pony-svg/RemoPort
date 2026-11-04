@@ -12,8 +12,8 @@
 //!
 //! The file operations are ported from RustConn's drive backend
 //! (`rustconn-core`, GPL-3.0-or-later); the read-only mode and the limits are
-//! Remoport's. Change notifications are not offered: the PC's file windows
-//! refresh when asked to, as with FreeRDP.
+//! Remoport's. Change notices follow RustConn's watcher, and never follow a
+//! symbolic link, so nothing outside a folder is described.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -41,9 +41,9 @@ use ironrdp_rdpdr::pdu::efs::{
     FileFullDirectoryInformation, FileInformationClass, FileInformationClassLevel,
     FileNamesInformation, FileRenameInformation, FileStandardInformation, FileSystemAttributes,
     FileSystemInformationClass, FileSystemInformationClassLevel, Information, NtStatus,
-    ServerDeviceAnnounceResponse, ServerDriveIoRequest, ServerDriveQueryDirectoryRequest,
-    ServerDriveQueryInformationRequest, ServerDriveQueryVolumeInformationRequest,
-    ServerDriveSetInformationRequest,
+    ServerDeviceAnnounceResponse, ServerDriveIoRequest, ServerDriveNotifyChangeDirectoryRequest,
+    ServerDriveQueryDirectoryRequest, ServerDriveQueryInformationRequest,
+    ServerDriveQueryVolumeInformationRequest, ServerDriveSetInformationRequest,
 };
 use ironrdp_rdpdr::pdu::esc::{ScardCall, ScardIoCtlCode};
 use ironrdp_svc::SvcMessage;
@@ -59,6 +59,9 @@ const MAX_READ: u32 = 1024 * 1024;
 
 /// Refused attempts written to the activity log in one session.
 const MAX_REPORTED: u32 = 20;
+
+/// Folders the PC may be waiting on for changes at once.
+const MAX_WATCHES: usize = 64;
 
 /// Access rights that change a file: the specific ones, and GENERIC_ALL and
 /// GENERIC_WRITE, which the bit set does not name.
@@ -98,6 +101,16 @@ struct OpenFile {
     delete_on_close: bool,
 }
 
+/// A folder the PC waits on for its next change (MS-RDPEFS 2.2.3.3.11):
+/// answered once, then the PC asks again.
+#[derive(Debug)]
+struct Watch {
+    request: DeviceIoRequest,
+    path: PathBuf,
+    recursive: bool,
+    filter: u32,
+}
+
 #[derive(Debug)]
 pub(crate) struct DriveBackend {
     shares: HashMap<u32, Share>,
@@ -105,6 +118,9 @@ pub(crate) struct DriveBackend {
     next_file_id: u32,
     events: mpsc::Sender<Event>,
     reported: u32,
+    /// Started at the first change the PC waits for.
+    watcher: Option<(notify::RecommendedWatcher, mpsc::Receiver<notify::Event>)>,
+    watches: HashMap<u32, Watch>,
 }
 
 impl_as_any!(DriveBackend);
@@ -157,6 +173,8 @@ impl DriveBackend {
             next_file_id: 1,
             events,
             reported: 0,
+            watcher: None,
+            watches: HashMap::new(),
         };
         (backend, drives)
     }
@@ -359,6 +377,7 @@ impl DriveBackend {
     }
 
     fn close(&mut self, req: DeviceCloseRequest) -> PduResult<Vec<SvcMessage>> {
+        self.stop_watching(req.device_io_request.file_id);
         if let Some(open) = self.open.remove(&req.device_io_request.file_id) {
             let OpenFile {
                 file,
@@ -741,11 +760,183 @@ impl DriveBackend {
     }
 }
 
+impl DriveBackend {
+    /// Starts waiting on the folder `req` names for its next change.
+    fn watch(&mut self, req: &ServerDriveNotifyChangeDirectoryRequest) -> Result<(), NtStatus> {
+        use notify::Watcher as _;
+        let file_id = req.device_io_request.file_id;
+        let path = match self.open.get(&file_id) {
+            Some(open) if open.path.is_dir() => open.path.clone(),
+            Some(_) => return Err(NtStatus::NOT_A_DIRECTORY),
+            None => return Err(NtStatus::INVALID_HANDLE),
+        };
+        if self.watches.len() >= MAX_WATCHES && !self.watches.contains_key(&file_id) {
+            return Err(NtStatus::INSUFFICIENT_RESOURCES);
+        }
+        if self.watcher.is_none() {
+            let (changes, received) = mpsc::channel();
+            let watcher = notify::RecommendedWatcher::new(
+                move |event: notify::Result<notify::Event>| {
+                    if let Ok(event) = event {
+                        let _ = changes.send(event);
+                    }
+                },
+                notify::Config::default().with_follow_symlinks(false),
+            )
+            .map_err(|_| NtStatus::NOT_SUPPORTED)?;
+            self.watcher = Some((watcher, received));
+        }
+        let recursive = req.watch_tree != 0;
+        let mode = if recursive {
+            notify::RecursiveMode::Recursive
+        } else {
+            notify::RecursiveMode::NonRecursive
+        };
+        if let Some((watcher, _)) = &mut self.watcher {
+            watcher
+                .watch(&path, mode)
+                .map_err(|_| NtStatus::NOT_SUPPORTED)?;
+        }
+        self.watches.insert(
+            file_id,
+            Watch {
+                request: req.device_io_request.clone(),
+                path,
+                recursive,
+                filter: req.completion_filter,
+            },
+        );
+        Ok(())
+    }
+
+    fn stop_watching(&mut self, file_id: u32) {
+        use notify::Watcher as _;
+        let Some(watch) = self.watches.remove(&file_id) else {
+            return;
+        };
+        let still_used = self.watches.values().any(|w| w.path == watch.path);
+        if let (false, Some((watcher, _))) = (still_used, &mut self.watcher) {
+            let _ = watcher.unwatch(&watch.path);
+        }
+    }
+
+    /// Answers each waiting folder that changed since the last call.
+    fn changes(&mut self) -> Vec<SvcMessage> {
+        let Some((_, received)) = &self.watcher else {
+            return Vec::new();
+        };
+        let events: Vec<notify::Event> = received.try_iter().take(1024).collect();
+        let mut answers = Vec::new();
+        for event in events {
+            let Some(action) = file_action(&event.kind) else {
+                continue;
+            };
+            for path in &event.paths {
+                let answered: Vec<u32> = self
+                    .watches
+                    .iter()
+                    .filter(|(_, w)| covers(w, path) && filter_matches(w.filter, &event.kind))
+                    .map(|(&file_id, _)| file_id)
+                    .collect();
+                for file_id in answered {
+                    let Some(watch) = self.watches.get(&file_id) else {
+                        continue;
+                    };
+                    let name = relative_name(&watch.path, path);
+                    answers.push(SvcMessage::from(
+                        RdpdrPdu::ClientDriveNotifyChangeDirectoryResponse(
+                            ClientDriveNotifyChangeDirectoryResponse::new(
+                                watch.request.clone(),
+                                NtStatus::SUCCESS,
+                                notify_information(action, &name),
+                            ),
+                        ),
+                    ));
+                    self.stop_watching(file_id);
+                }
+            }
+        }
+        answers
+    }
+}
+
+/// Whether a change at `path` is one `watch` waits for.
+fn covers(watch: &Watch, path: &Path) -> bool {
+    if watch.recursive {
+        path != watch.path && path.starts_with(&watch.path)
+    } else {
+        path.parent() == Some(watch.path.as_path())
+    }
+}
+
+/// The FILE_ACTION_* code for a change (MS-FSCC 2.4.42).
+fn file_action(kind: &notify::EventKind) -> Option<u32> {
+    use notify::EventKind;
+    use notify::event::{ModifyKind, RenameMode};
+    match kind {
+        EventKind::Create(_) => Some(1),
+        EventKind::Remove(_) => Some(2),
+        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => Some(4),
+        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => Some(5),
+        EventKind::Modify(_) => Some(3),
+        _ => None,
+    }
+}
+
+/// Whether the PC's completion filter asks for this kind of change
+/// (MS-SMB2 2.2.35), as in RustConn.
+fn filter_matches(filter: u32, kind: &notify::EventKind) -> bool {
+    use notify::EventKind;
+    use notify::event::ModifyKind;
+    const FILE_NAME: u32 = 0x01;
+    const DIR_NAME: u32 = 0x02;
+    const ATTRIBUTES: u32 = 0x04;
+    const SIZE: u32 = 0x08;
+    const LAST_WRITE: u32 = 0x10;
+    const LAST_ACCESS: u32 = 0x20;
+    const CREATION: u32 = 0x40;
+    const SECURITY: u32 = 0x100;
+    let wanted = match kind {
+        EventKind::Create(_) => FILE_NAME | DIR_NAME | CREATION,
+        EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_)) => FILE_NAME | DIR_NAME,
+        EventKind::Modify(ModifyKind::Data(_)) => SIZE | LAST_WRITE,
+        EventKind::Modify(ModifyKind::Metadata(_)) => ATTRIBUTES | LAST_ACCESS | SECURITY,
+        EventKind::Modify(_) => LAST_WRITE,
+        _ => 0,
+    };
+    filter & wanted != 0
+}
+
+/// `path` relative to the watched folder, with Windows separators.
+fn relative_name(folder: &Path, path: &Path) -> String {
+    path.strip_prefix(folder)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('/', "\\")
+}
+
+/// One FILE_NOTIFY_INFORMATION entry (MS-FSCC 2.4.42), the last one.
+fn notify_information(action: u32, name: &str) -> Vec<u8> {
+    let name: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut entry = Vec::with_capacity(12 + name.len());
+    entry.extend_from_slice(&0u32.to_le_bytes());
+    entry.extend_from_slice(&action.to_le_bytes());
+    entry.extend_from_slice(&u32::try_from(name.len()).unwrap_or(u32::MAX).to_le_bytes());
+    entry.extend_from_slice(&name);
+    entry
+}
+
 impl RdpdrBackend for DriveBackend {
     fn reset(&mut self) -> PduResult<()> {
         // A new initialization sequence: the PC's earlier handles are gone.
         self.open.clear();
+        self.watches.clear();
+        self.watcher = None;
         Ok(())
+    }
+
+    fn poll_deferred_messages(&mut self) -> PduResult<Vec<SvcMessage>> {
+        Ok(self.changes())
     }
 
     fn handle_server_device_announce_response(
@@ -789,13 +980,17 @@ impl RdpdrBackend for DriveBackend {
                 }))
             }
             ServerDriveIoRequest::ServerDriveNotifyChangeDirectoryRequest(req) => {
-                reply(RdpdrPdu::ClientDriveNotifyChangeDirectoryResponse(
-                    ClientDriveNotifyChangeDirectoryResponse::new(
-                        req.device_io_request,
-                        NtStatus::NOT_SUPPORTED,
-                        Vec::new(),
-                    ),
-                ))
+                match self.watch(&req) {
+                    // Answered when the folder changes.
+                    Ok(()) => Ok(Vec::new()),
+                    Err(status) => reply(RdpdrPdu::ClientDriveNotifyChangeDirectoryResponse(
+                        ClientDriveNotifyChangeDirectoryResponse::new(
+                            req.device_io_request,
+                            status,
+                            Vec::new(),
+                        ),
+                    )),
+                }
             }
             // Byte-range locks are acknowledged, not enforced, as in RustConn.
             ServerDriveIoRequest::ServerDriveLockControlRequest(req) => {
@@ -1348,6 +1543,54 @@ mod tests {
             CreateOptions::empty(),
         );
         assert_eq!(refused.0, 0xC000_009A, "INSUFFICIENT_RESOURCES");
+    }
+
+    #[test]
+    fn a_change_in_a_watched_folder_is_reported_once() {
+        let share = tempfile::tempdir().expect("share");
+        let mut backend = backend(share.path(), true);
+        let (status, dir) = open(
+            &mut backend,
+            "\\",
+            DesiredAccess::FILE_READ_DATA_OR_FILE_LIST_DIRECTORY,
+            CreateDisposition::FILE_OPEN,
+            CreateOptions::FILE_DIRECTORY_FILE,
+        );
+        assert_eq!(status, 0);
+        let waiting = backend
+            .handle_drive_io_request(
+                ServerDriveIoRequest::ServerDriveNotifyChangeDirectoryRequest(
+                    ServerDriveNotifyChangeDirectoryRequest {
+                        device_io_request: header(dir, MajorFunction::DirectoryControl),
+                        watch_tree: 0,
+                        completion_filter: 0x01,
+                    },
+                ),
+            )
+            .expect("answered");
+        assert!(waiting.is_empty(), "answered before anything changed");
+
+        std::fs::write(share.path().join("new.txt"), b"x").expect("file");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let answers = loop {
+            let answers = backend.poll_deferred_messages().expect("polled");
+            if !answers.is_empty() || std::time::Instant::now() > deadline {
+                break answers;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(answers.len(), 1, "one answer for the one change");
+        let bytes = answers[0].encode_unframed_pdu().expect("encodes");
+        assert_eq!(u32_at(&bytes, STATUS_OFFSET), 0);
+        let name: Vec<u8> = "new.txt"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert!(bytes.windows(name.len()).any(|w| w == name.as_slice()));
+        // Answered once: a further change waits for the PC to ask again.
+        std::fs::write(share.path().join("other.txt"), b"y").expect("file");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(backend.poll_deferred_messages().expect("polled").is_empty());
     }
 
     #[test]

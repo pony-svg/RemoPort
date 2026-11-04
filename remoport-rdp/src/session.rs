@@ -38,7 +38,11 @@ pub(crate) async fn run(
         result,
         mut clipboard,
         mut microphone,
+        drives,
     } = established;
+    // How often shared folders' changes are sent to the PC.
+    let mut folder_changes = tokio::time::interval(Duration::from_millis(500));
+    folder_changes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let (mut reader, mut writer) = split_tokio_framed(framed);
     let mut image = DecodedImage::new(
         PixelFormat::BgrA32,
@@ -89,6 +93,11 @@ pub(crate) async fn run(
                 // The PC did not answer the paste in time: the keys go anyway.
                 for command in clipboard.as_mut().map(Clipboard::release).unwrap_or_default() {
                     apply_command(command, &mut stage, &mut image, &mut writer, &mut input, events).await;
+                }
+            }
+            _ = folder_changes.tick(), if drives => {
+                if let Some(frame) = folder_change_frame(&mut stage) {
+                    writer.write_all(&frame).await.map_err(lost)?;
                 }
             }
             Some(messages) = next_microphone_packet(&mut microphone) => {
@@ -149,6 +158,20 @@ pub(crate) async fn run(
             }
         }
     }
+}
+
+/// Shared folders' changes the PC waits for, ready to send.
+fn folder_change_frame(stage: &mut ActiveStage) -> Option<Vec<u8>> {
+    let rdpdr = stage.get_svc_processor_mut::<ironrdp_rdpdr::Rdpdr>()?;
+    let messages = rdpdr.poll_deferred_messages().ok()?;
+    if messages.is_empty() {
+        return None;
+    }
+    stage
+        .process_svc_processor_messages(
+            ironrdp_svc::SvcProcessorMessages::<ironrdp_rdpdr::Rdpdr>::new(messages),
+        )
+        .ok()
 }
 
 /// The next microphone packet, or never when the PC may not use it.

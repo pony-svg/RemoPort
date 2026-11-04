@@ -57,6 +57,8 @@ pub(crate) struct Established {
     pub clipboard: Option<Clipboard>,
     /// Microphone packets for the session to send, when the PC may use it.
     pub microphone: Option<tokio::sync::mpsc::Receiver<Vec<SvcMessage>>>,
+    /// Folders are shared, so their change notices need sending.
+    pub drives: bool,
 }
 
 pub(crate) async fn connect(
@@ -271,6 +273,7 @@ pub(crate) async fn connect(
             result,
             clipboard,
             microphone,
+            drives: drives > 0,
         }),
         Ok(Ok(ConnectionOutcome::Redirected(_))) => Err(Error::BrokerRedirect),
         Ok(Err(e)) => {

@@ -1310,7 +1310,15 @@ impl ActiveSession {
 
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
-        let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        // An id of its own: an automatic one depends on what came before in the
+        // window, which changes as the bar hides in full screen, and with it
+        // the screen would lose the keyboard on every switch.
+        let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+        let response = ui.interact(
+            rect,
+            egui::Id::new(("session-screen", index)),
+            Sense::click_and_drag(),
+        );
         ui.painter()
             .rect_filled(rect, Rounding::ZERO, Color32::BLACK);
         let region = self.region(index)?;

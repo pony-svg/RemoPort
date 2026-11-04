@@ -118,6 +118,8 @@ pub(crate) struct DriveBackend {
     next_file_id: u32,
     events: mpsc::Sender<Event>,
     reported: u32,
+    /// The PC has opened something in a shared folder.
+    used: bool,
     /// Started at the first change the PC waits for.
     watcher: Option<(notify::RecommendedWatcher, mpsc::Receiver<notify::Event>)>,
     watches: HashMap<u32, Watch>,
@@ -173,6 +175,7 @@ impl DriveBackend {
             next_file_id: 1,
             events,
             reported: 0,
+            used: false,
             watcher: None,
             watches: HashMap::new(),
         };
@@ -280,6 +283,10 @@ impl DriveBackend {
         if read_only
             && (creates || delete_on_close || req.desired_access.bits() & MODIFYING_ACCESS != 0)
         {
+            self.report(format!(
+                "Refused: the shared folder is read-only, and the PC tried to change {:?}",
+                req.path
+            ));
             return create_reply(
                 header,
                 NtStatus::MEDIA_WRITE_PROTECTED,
@@ -359,6 +366,12 @@ impl DriveBackend {
 
         match opened {
             Ok(file) => {
+                if !self.used {
+                    self.used = true;
+                    let _ = self
+                        .events
+                        .send(Event::Progress("The PC opened a shared folder".to_string()));
+                }
                 let file_id = self.alloc_file_id();
                 self.open.insert(
                     file_id,
@@ -670,6 +683,10 @@ impl DriveBackend {
         let file_id = req.device_io_request.file_id;
         let device_id = req.device_io_request.device_id;
         let status = if self.read_only(device_id) {
+            self.report(
+                "Refused: the shared folder is read-only, and the PC tried to change a file"
+                    .to_string(),
+            );
             NtStatus::MEDIA_WRITE_PROTECTED
         } else if !self.open.contains_key(&file_id) {
             NtStatus::INVALID_HANDLE
@@ -1378,6 +1395,48 @@ mod tests {
             );
         }
         assert_eq!(names, vec![".", "..", "file.txt"]);
+    }
+
+    #[test]
+    fn the_log_says_when_a_folder_is_used_and_what_it_refused() {
+        let share = tempfile::tempdir().expect("share");
+        std::fs::write(share.path().join("doc.txt"), b"x").expect("file");
+        let (events, received) = mpsc::channel();
+        let folders = [SharedFolder {
+            path: share.path().to_path_buf(),
+            read_only: true,
+        }];
+        let (mut backend, _) = DriveBackend::new(&folders, events);
+        assert_eq!(open_to_write(&mut backend, "\\doc.txt\n").0, 0xC000_00A2);
+        for _ in 0..2 {
+            let status = open(
+                &mut backend,
+                "\\doc.txt",
+                DesiredAccess::FILE_READ_DATA_OR_FILE_LIST_DIRECTORY,
+                CreateDisposition::FILE_OPEN,
+                CreateOptions::empty(),
+            );
+            assert_eq!(status.0, 0);
+        }
+        let log: Vec<String> = received
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::Progress(line) => Some(line),
+                _ => None,
+            })
+            .collect();
+        // A path from the PC goes in escaped: it cannot forge a line of the log.
+        assert!(
+            log.iter()
+                .any(|l| l.contains("read-only") && l.contains(r"doc.txt\n")),
+            "{log:?}"
+        );
+        assert_eq!(
+            log.iter()
+                .filter(|l| l.contains("opened a shared folder"))
+                .count(),
+            1
+        );
     }
 
     #[test]

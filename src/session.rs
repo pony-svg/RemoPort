@@ -1535,6 +1535,10 @@ impl ActiveSession {
                 Event::Paste(text) if focused => {
                     self.keys_down.insert(keymap::V);
                     if self.bookmark.share_clipboard {
+                        logging::event(format_args!(
+                            "Pasted into the PC: {} characters",
+                            text.chars().count()
+                        ));
                         self.send(Command::Paste(ClipboardText::new(text)));
                     } else {
                         self.send_key(keymap::V, true);

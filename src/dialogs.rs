@@ -534,6 +534,9 @@ impl AddEditPcDialog {
                     self.new_folder_path.clear();
                     self.folder_error = None;
                 } else {
+                    logging::event(format_args!(
+                        "Folder not added: {path} is not a folder here"
+                    ));
                     self.folder_error = Some(tf("{} is not a folder on this computer.", &[&path]));
                 }
             }

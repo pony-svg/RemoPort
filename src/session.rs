@@ -1054,6 +1054,12 @@ impl ActiveSession {
     fn reset_session(&mut self) {
         if let Some(mut session) = self.session.take() {
             session.disconnect();
+            // What the engine said on its way out still belongs in the log.
+            while let Some(event) = session.try_event() {
+                if let EngineEvent::Progress(message) = event {
+                    logging::event(message);
+                }
+            }
         }
         self.screen = None;
         self.display_control = false;

@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use remoport_rdp::{MicrophonePackets, SoundInput, SoundOutput};
@@ -21,10 +21,23 @@ use crate::logging;
 /// than letting the sound fall behind the picture.
 const MAX_QUEUED_SECONDS: usize = 1;
 
+/// How much sound gathers before it plays: a cushion, so that a block arriving a
+/// little late does not cut the sound. A sound shorter than this plays anyway
+/// once it has waited this long.
+const CUSHION: Duration = Duration::from_millis(120);
+
 #[derive(Default)]
 struct Buffer {
     samples: VecDeque<i16>,
     max: usize,
+    /// Samples to gather before playing.
+    cushion: usize,
+    playing: bool,
+    /// When the sound now gathering began.
+    gathering_since: Option<Instant>,
+    /// For the log: samples played, and how often the sound ran dry.
+    played: u64,
+    ran_dry: u64,
 }
 
 impl Buffer {
@@ -32,6 +45,31 @@ impl Buffer {
         self.samples.extend(samples);
         let excess = self.samples.len().saturating_sub(self.max);
         self.samples.drain(..excess);
+        if !self.playing && self.gathering_since.is_none() {
+            self.gathering_since = Some(Instant::now());
+        }
+    }
+
+    /// Whether to play now: enough has gathered, or it has waited long enough.
+    fn ready(&mut self) -> bool {
+        if !self.playing && !self.samples.is_empty() {
+            let waited = self
+                .gathering_since
+                .is_some_and(|since| since.elapsed() >= CUSHION);
+            if waited || self.samples.len() >= self.cushion {
+                self.playing = true;
+                self.gathering_since = None;
+            }
+        }
+        self.playing
+    }
+
+    fn reset(&mut self) {
+        self.samples.clear();
+        self.playing = false;
+        self.gathering_since = None;
+        self.played = 0;
+        self.ran_dry = 0;
     }
 }
 
@@ -62,7 +100,9 @@ impl Speaker {
     fn start(&mut self, rate: u32, channels: u16) {
         self.stop();
         if let Ok(mut buffer) = self.buffer.lock() {
-            buffer.max = rate as usize * usize::from(channels) * MAX_QUEUED_SECONDS;
+            let per_second = rate as usize * usize::from(channels);
+            buffer.max = per_second * MAX_QUEUED_SECONDS;
+            buffer.cushion = per_second * CUSHION.as_millis() as usize / 1000;
         }
         let buffer = Arc::clone(&self.buffer);
         let volume = Arc::clone(&self.volume);
@@ -106,7 +146,15 @@ impl SoundOutput for Speaker {
             let _ = thread.join();
         }
         if let Ok(mut buffer) = self.buffer.lock() {
-            buffer.samples.clear();
+            if let (Some((rate, channels)), true) = (self.format, buffer.played > 0) {
+                let per_second = f64::from(rate) * f64::from(channels);
+                logging::event(format_args!(
+                    "Sound: {:.1} s played, ran dry {} times (a sound's own end counts as one)",
+                    buffer.played as f64 / per_second.max(1.0),
+                    buffer.ran_dry,
+                ));
+            }
+            buffer.reset();
         }
         self.format = None;
     }
@@ -179,11 +227,28 @@ fn fill<T: Copy>(
     silence: T,
 ) {
     let level = f32::from_bits(volume.load(Ordering::Relaxed));
-    let mut buffer = buffer.lock().ok();
+    let Ok(mut buffer) = buffer.lock() else {
+        data.fill(silence);
+        return;
+    };
+    if !buffer.ready() {
+        data.fill(silence);
+        return;
+    }
     for slot in data.iter_mut() {
-        *slot = match buffer.as_mut().and_then(|b| b.samples.pop_front()) {
-            Some(sample) => convert(f32::from(sample) * level),
-            None => silence,
+        *slot = match buffer.samples.pop_front() {
+            Some(sample) => {
+                buffer.played += 1;
+                convert(f32::from(sample) * level)
+            }
+            None => {
+                // Dry: gather a cushion again, instead of stuttering on each block.
+                if buffer.playing {
+                    buffer.playing = false;
+                    buffer.ran_dry += 1;
+                }
+                silence
+            }
         };
     }
 }
@@ -433,12 +498,16 @@ mod tests {
     #[test]
     fn the_buffer_keeps_only_the_latest_sound() {
         let mut buffer = Buffer {
-            samples: VecDeque::new(),
             max: 4,
+            ..Buffer::default()
         };
         buffer.push(&[1, 2, 3]);
         buffer.push(&[4, 5, 6]);
         assert_eq!(Vec::from(buffer.samples), vec![3, 4, 5, 6]);
+    }
+
+    fn half_volume() -> AtomicU32 {
+        AtomicU32::new(0.5f32.to_bits())
     }
 
     #[test]
@@ -446,13 +515,56 @@ mod tests {
         let buffer = Mutex::new(Buffer {
             samples: VecDeque::from(vec![100, 200, 300]),
             max: 10,
+            cushion: 1,
+            ..Buffer::default()
         });
-        let volume = AtomicU32::new(0.5f32.to_bits());
+        let volume = half_volume();
         let mut out = [9i16; 2];
         fill(&mut out, &buffer, &volume, |v| v as i16, 0);
         assert_eq!(out, [50, 100]);
         let mut out = [9i16; 3];
         fill(&mut out, &buffer, &volume, |v| v as i16, 0);
         assert_eq!(out, [150, 0, 0]);
+        let buffer = buffer.lock().unwrap();
+        assert_eq!((buffer.played, buffer.ran_dry), (3, 1));
+    }
+
+    #[test]
+    fn sound_gathers_a_cushion_first_and_again_after_running_dry() {
+        let buffer = Mutex::new(Buffer {
+            max: 100,
+            cushion: 4,
+            ..Buffer::default()
+        });
+        let volume = half_volume();
+        let play = |count: usize| {
+            let mut out = vec![9i16; count];
+            fill(&mut out, &buffer, &volume, |v| v as i16, 0);
+            out
+        };
+        buffer.lock().unwrap().push(&[100, 100]);
+        assert_eq!(play(2), [0, 0], "too little to start");
+        buffer.lock().unwrap().push(&[100, 100]);
+        assert_eq!(play(5), [50, 50, 50, 50, 0], "started, and ran dry");
+        // Dry: a late block alone does not restart it, with its next gap ahead.
+        buffer.lock().unwrap().push(&[100]);
+        assert_eq!(play(1), [0]);
+        buffer.lock().unwrap().push(&[100, 100, 100]);
+        assert_eq!(play(4), [50, 50, 50, 50]);
+    }
+
+    #[test]
+    fn a_sound_shorter_than_the_cushion_still_plays() {
+        let buffer = Mutex::new(Buffer {
+            max: 100,
+            cushion: 1000,
+            ..Buffer::default()
+        });
+        let volume = half_volume();
+        buffer.lock().unwrap().push(&[100, 100]);
+        buffer.lock().unwrap().gathering_since = Instant::now().checked_sub(CUSHION);
+        let mut out = [9i16; 3];
+        fill(&mut out, &buffer, &volume, |v| v as i16, 0);
+        assert_eq!(out, [50, 50, 0]);
     }
 }

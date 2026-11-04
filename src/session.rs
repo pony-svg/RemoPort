@@ -17,8 +17,8 @@ use egui::{
 };
 use remoport_rdp::{
     CertificateInfo, ClipboardText, Command, ConnectConfig, Error, Event as EngineEvent,
-    IdentityProblem, MouseButton, Rect as RemoteRect, ResumeCookie, Session, SharedFolder,
-    SoundInput, SoundOutput, TrustReply, TrustStore,
+    IdentityProblem, MouseButton, PointerShape, Rect as RemoteRect, RemotePointer, ResumeCookie,
+    Session, SharedFolder, SoundInput, SoundOutput, TrustReply, TrustStore,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,6 +53,31 @@ const RECONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const EVENTS_PER_FRAME: usize = 2000;
 
 const DANGER: Color32 = Color32::from_rgb(0xc4, 0x2b, 0x1c);
+
+/// What the pointer looks like over the remote desktop.
+enum PointerLook {
+    /// This computer's own arrow.
+    System,
+    Hidden,
+    /// The PC's picture, with its size and hotspot in the PC's pixels.
+    Drawn {
+        texture: TextureHandle,
+        size: egui::Vec2,
+        hotspot: egui::Vec2,
+    },
+}
+
+impl PointerLook {
+    fn load(ctx: &Context, shape: &PointerShape) -> Self {
+        let size = [usize::from(shape.width), usize::from(shape.height)];
+        let image = ColorImage::from_rgba_unmultiplied(size, &shape.rgba);
+        Self::Drawn {
+            texture: ctx.load_texture("remote-pointer", image, TextureOptions::LINEAR),
+            size: vec2(f32::from(shape.width), f32::from(shape.height)),
+            hotspot: vec2(f32::from(shape.hotspot_x), f32::from(shape.hotspot_y)),
+        }
+    }
+}
 
 enum Phase {
     /// Asking for the user name and password.
@@ -169,7 +194,10 @@ pub struct ActiveSession {
     requested_size: Option<(u16, u16)>,
     /// Whether the server can change resolution without reconnecting.
     display_control: bool,
-    remote_cursor_hidden: bool,
+    /// What the pointer looks like over the remote desktop.
+    pointer: PointerLook,
+    /// A new picture for the pointer, until there is a frame to load it in.
+    new_pointer: Option<PointerShape>,
     /// Modifier keys held on the remote side.
     modifiers: Modifiers,
     last_pointer: Option<(u16, u16)>,
@@ -240,7 +268,8 @@ impl ActiveSession {
             pending_size: None,
             requested_size: None,
             display_control: false,
-            remote_cursor_hidden: false,
+            pointer: PointerLook::System,
+            new_pointer: None,
             modifiers: Modifiers::NONE,
             last_pointer: None,
             remote_copy: None,
@@ -293,7 +322,7 @@ impl ActiveSession {
             return;
         }
 
-        if !(fullscreen && matches!(self.phase, Phase::Connected)) {
+        if !matches!(self.phase, Phase::Connected) {
             self.key_grab = None;
             self.key_grab_tried = false;
         } else if !self.key_grab_tried {
@@ -302,6 +331,9 @@ impl ActiveSession {
                 .session
                 .as_ref()
                 .and_then(|session| KeyGrab::start(session.commander()));
+        }
+        if let Some(grab) = &self.key_grab {
+            grab.set_fullscreen(fullscreen);
         }
 
         if let Phase::Reconnecting {
@@ -871,6 +903,13 @@ impl ActiveSession {
                 ));
                 self.screen = Some(Screen::new(width, height));
                 self.phase = Phase::Connected;
+                // The PC may have Caps Lock on from before. Where this computer
+                // can say what its own lock keys are, that follows at once.
+                self.send(Command::LockKeys {
+                    caps: false,
+                    num: true,
+                    scroll: false,
+                });
                 if let Some(password) = self.to_remember.take() {
                     self.keyring = Some(credentials::save(self.bookmark.id, password));
                 }
@@ -893,7 +932,17 @@ impl ActiveSession {
                 logging::event("The remote desktop can follow the window's size");
                 self.display_control = true;
             }
-            EngineEvent::PointerHidden(hidden) => self.remote_cursor_hidden = hidden,
+            EngineEvent::Pointer(pointer) => match pointer {
+                RemotePointer::Default => {
+                    self.pointer = PointerLook::System;
+                    self.new_pointer = None;
+                }
+                RemotePointer::Hidden => {
+                    self.pointer = PointerLook::Hidden;
+                    self.new_pointer = None;
+                }
+                RemotePointer::Shape(shape) => self.new_pointer = Some(shape),
+            },
             EngineEvent::Clipboard(text) => self.remote_copy = Some(text),
             EngineEvent::Microphone(live) => self.microphone_live = live,
             EngineEvent::Monitors(mut monitors) => {
@@ -1015,6 +1064,8 @@ impl ActiveSession {
         self.microphone_live = false;
         self.key_grab = None;
         self.key_grab_tried = false;
+        self.pointer = PointerLook::System;
+        self.new_pointer = None;
         self.keys_down.clear();
         self.bar_rect = None;
         self.remote_monitors.clear();
@@ -1337,8 +1388,34 @@ impl ActiveSession {
                 Color32::from_white_alpha(160),
             );
         }
-        if response.hovered() && self.remote_cursor_hidden {
-            ctx.set_cursor_icon(egui::CursorIcon::None);
+        if let Some(shape) = self.new_pointer.take() {
+            self.pointer = PointerLook::load(&ctx, &shape);
+        }
+        // Drawn here at the pointer's place, so it moves with no delay and
+        // looks as the PC wants: an I-beam over text, a hand over a link.
+        if response.hovered() || response.dragged() {
+            let hover = ctx.input(|i| i.pointer.hover_pos());
+            let over_picture = hover.filter(|pos| image.contains(*pos));
+            match (&self.pointer, over_picture) {
+                (PointerLook::Hidden, Some(_)) => ctx.set_cursor_icon(egui::CursorIcon::None),
+                (
+                    PointerLook::Drawn {
+                        texture,
+                        size,
+                        hotspot,
+                    },
+                    Some(pos),
+                ) => {
+                    ctx.set_cursor_icon(egui::CursorIcon::None);
+                    ui.painter().image(
+                        texture.id(),
+                        pointer_rect(pos, *size, *hotspot, scale / ppp),
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+                _ => {}
+            }
         }
 
         let bar = self.bar_rect.filter(|_| index == 0);
@@ -1716,6 +1793,17 @@ fn desktop_size((width, height): (u16, u16)) -> (u16, u16) {
     )
 }
 
+/// Where the PC's pointer picture goes for a pointer at `pos`: its hotspot on
+/// that spot, in a picture scaled by `points_per_pixel` like the desktop's.
+fn pointer_rect(
+    pos: egui::Pos2,
+    size: egui::Vec2,
+    hotspot: egui::Vec2,
+    points_per_pixel: f32,
+) -> Rect {
+    Rect::from_min_size(pos - hotspot * points_per_pixel, size * points_per_pixel)
+}
+
 /// What to send for one key event. A release with no press behind it goes
 /// nowhere, since the PC has no press to match, except Ctrl+V: with nothing to
 /// paste on this computer egui keeps the press for itself, and the PC still
@@ -1835,6 +1923,13 @@ mod tests {
         assert_eq!(split_domain("jdoe@shd.gov.co"), (None, "jdoe@shd.gov.co"));
         assert_eq!(split_domain("jdoe"), (None, "jdoe"));
         assert_eq!(split_domain("\\jdoe"), (None, "\\jdoe"));
+    }
+
+    #[test]
+    fn the_pointer_picture_lands_on_its_hotspot() {
+        let rect = pointer_rect(pos2(100.0, 50.0), vec2(32.0, 32.0), vec2(4.0, 8.0), 0.5);
+        assert_eq!(rect.min, pos2(98.0, 46.0));
+        assert_eq!(rect.size(), vec2(16.0, 16.0));
     }
 
     #[test]

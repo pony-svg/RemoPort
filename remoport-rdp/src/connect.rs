@@ -5,7 +5,7 @@
 //! The order of the identity check and the sign-in follows RustConn's client
 //! (`rustconn-core`, GPL-3.0-or-later); the checks themselves are Remoport's.
 
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use ironrdp_connector::{
@@ -56,7 +56,10 @@ pub(crate) struct Established {
     /// The session's side of the clipboard, when it is shared.
     pub clipboard: Option<Clipboard>,
     /// Microphone packets for the session to send, when the PC may use it.
-    pub microphone: Option<tokio::sync::mpsc::Receiver<Vec<SvcMessage>>>,
+    pub microphone: Option<(
+        tokio::sync::mpsc::Receiver<Vec<SvcMessage>>,
+        Arc<microphone::Delivery>,
+    )>,
     /// Folders are shared, so their change notices need sending.
     pub drives: bool,
 }
@@ -185,22 +188,35 @@ pub(crate) async fn connect(
     // queues them for the session.
     let microphone = input.map(|input| {
         let (queue, packets) = tokio::sync::mpsc::channel(MICROPHONE_QUEUE);
+        let delivery = Arc::new(microphone::Delivery::default());
+        let counted = Arc::clone(&delivery);
         let uplink: ironrdp_rdpeai::client::DvcUplink = Box::new(move |_channel, messages| {
             // A full queue drops this packet: a gap, not a growing delay.
             match queue.try_send(messages) {
+                Ok(()) => {
+                    counted.queued();
+                    Ok(())
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    counted.dropped();
+                    Ok(())
+                }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     Err(ironrdp_pdu::pdu_other_err!("the session has ended"))
                 }
-                _ => Ok(()),
             }
         });
         drdynvc = std::mem::take(&mut drdynvc).with_dynamic_channel(
             ironrdp_rdpeai::client::RdpeaiClient::new(
-                Box::new(microphone::Handler::new(input, events.clone())),
+                Box::new(microphone::Handler::new(
+                    input,
+                    events.clone(),
+                    Arc::clone(&delivery),
+                )),
                 uplink,
             ),
         );
-        packets
+        (packets, delivery)
     });
     // Advertising the pipeline early is what makes Windows open it at all.
     connector.config.support_dyn_vc_gfx_protocol = true;

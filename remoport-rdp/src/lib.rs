@@ -188,6 +188,25 @@ pub enum MouseButton {
     X2,
 }
 
+/// What the PC wants the pointer to look like.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemotePointer {
+    /// The system's usual arrow.
+    Default,
+    Hidden,
+    Shape(PointerShape),
+}
+
+/// A pointer picture from the PC: RGBA, not premultiplied, row after row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointerShape {
+    pub width: u16,
+    pub height: u16,
+    pub hotspot_x: u16,
+    pub hotspot_y: u16,
+    pub rgba: Vec<u8>,
+}
+
 /// The user's answer about a PC's identity. Dropping it without answering
 /// counts as "no".
 pub struct TrustReply(tokio::sync::oneshot::Sender<bool>);
@@ -233,7 +252,8 @@ pub enum Event {
     Graphics(String),
     /// The desktop can now follow the window's size.
     DisplayControlReady,
-    PointerHidden(bool),
+    /// What the pointer looks like over the remote desktop.
+    Pointer(RemotePointer),
     /// The PC copied this text. It is the app's to take or leave.
     Clipboard(ClipboardText),
     /// The PC opened (`true`) or closed the microphone.
@@ -276,6 +296,12 @@ pub enum Command {
     /// The size of each screen, left to right, for a session on several.
     Layout(Vec<(u16, u16)>),
     CtrlAltDel,
+    /// The lock keys on this computer, so typing means the same on the PC.
+    LockKeys {
+        caps: bool,
+        num: bool,
+        scroll: bool,
+    },
     /// The user pasted this text: the PC gets it, when the clipboard is
     /// shared with it, and then the V of Ctrl+V. Ctrl itself is sent as a key.
     Paste(ClipboardText),

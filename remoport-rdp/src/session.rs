@@ -3,7 +3,7 @@
 //! RustConn's client (`rustconn-core`, GPL-3.0-or-later); the clipboard's
 //! handling is Remoport's.
 
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use ironrdp_connector::connection_activation::{
@@ -22,7 +22,7 @@ use tokio::time::Instant;
 
 use crate::clipboard::Clipboard;
 use crate::connect::Established;
-use crate::{Command, Error, Event, MouseButton, Rect, ResumeCookie};
+use crate::{Command, Error, Event, MouseButton, PointerShape, Rect, RemotePointer, ResumeCookie};
 
 /// The V key, pressed for a paste.
 const V: u8 = 0x2F;
@@ -174,12 +174,20 @@ fn folder_change_frame(stage: &mut ActiveStage) -> Option<Vec<u8>> {
         .ok()
 }
 
-/// The next microphone packet, or never when the PC may not use it.
+/// The next microphone packet, noting how many waited behind it; or never
+/// when the PC may not use the microphone.
 async fn next_microphone_packet(
-    packets: &mut Option<tokio_mpsc::Receiver<Vec<ironrdp_svc::SvcMessage>>>,
+    microphone: &mut Option<(
+        tokio_mpsc::Receiver<Vec<ironrdp_svc::SvcMessage>>,
+        Arc<crate::microphone::Delivery>,
+    )>,
 ) -> Option<Vec<ironrdp_svc::SvcMessage>> {
-    match packets {
-        Some(packets) => packets.recv().await,
+    match microphone {
+        Some((packets, delivery)) => {
+            let next = packets.recv().await;
+            delivery.waiting(packets.len());
+            next
+        }
         None => std::future::pending().await,
     }
 }
@@ -233,10 +241,22 @@ where
             }
         }
         ActiveStageOutput::PointerHidden => {
-            let _ = events.send(Event::PointerHidden(true));
+            let _ = events.send(Event::Pointer(RemotePointer::Hidden));
         }
-        ActiveStageOutput::PointerDefault | ActiveStageOutput::PointerBitmap(_) => {
-            let _ = events.send(Event::PointerHidden(false));
+        ActiveStageOutput::PointerDefault => {
+            let _ = events.send(Event::Pointer(RemotePointer::Default));
+        }
+        ActiveStageOutput::PointerBitmap(pointer) => {
+            let shape = pointer_shape(
+                pointer.width,
+                pointer.height,
+                pointer.hotspot_x,
+                pointer.hotspot_y,
+                &pointer.bitmap_data,
+            );
+            if let Some(shape) = shape {
+                let _ = events.send(Event::Pointer(RemotePointer::Shape(shape)));
+            }
         }
         ActiveStageOutput::Terminate(reason) => {
             let _ = events.send(Event::Progress(format!(
@@ -383,6 +403,11 @@ async fn apply_command(
                 Operation::KeyReleased(ctrl),
             ]
         }
+        Command::LockKeys { caps, num, scroll } => {
+            let event = ironrdp_input::synchronize_event(scroll, num, caps, false);
+            send_input(stage, image, writer, &[event]).await;
+            return;
+        }
         Command::Layout(sizes) => {
             let frame = monitor_layout(&sizes)
                 .map_err(|e| e.to_string())
@@ -455,6 +480,28 @@ async fn send_input(
             }
         }
     }
+}
+
+/// The largest pointer the protocol carries (MS-RDPBCGR 2.2.9.1.1.4.4).
+const MAX_POINTER_SIDE: u16 = 384;
+
+/// A pointer picture from the PC, if it is one: an empty or oversized picture,
+/// or data that does not match its size, is not drawn.
+fn pointer_shape(
+    width: u16,
+    height: u16,
+    hotspot_x: u16,
+    hotspot_y: u16,
+    rgba: &[u8],
+) -> Option<PointerShape> {
+    let fits = width > 0 && height > 0 && width <= MAX_POINTER_SIDE && height <= MAX_POINTER_SIDE;
+    (fits && rgba.len() == usize::from(width) * usize::from(height) * 4).then(|| PointerShape {
+        width,
+        height,
+        hotspot_x: hotspot_x.min(width - 1),
+        hotspot_y: hotspot_y.min(height - 1),
+        rgba: rgba.to_vec(),
+    })
 }
 
 /// A Display Control layout for screens side by side, left to right, the
@@ -585,6 +632,20 @@ mod tests {
         };
         assert_eq!(region_data(&image, rect).len(), 2 * 2 * 4);
         let _ = &mut image;
+    }
+
+    #[test]
+    fn a_pointer_from_the_pc_is_only_trusted_when_it_adds_up() {
+        let two_by_two = [7u8; 16];
+        let shape = pointer_shape(2, 2, 1, 9, &two_by_two).expect("a pointer");
+        assert_eq!(
+            (shape.hotspot_x, shape.hotspot_y),
+            (1, 1),
+            "hotspot kept inside"
+        );
+        assert!(pointer_shape(2, 2, 0, 0, &two_by_two[..15]).is_none());
+        assert!(pointer_shape(0, 2, 0, 0, &[]).is_none());
+        assert!(pointer_shape(1000, 1, 0, 0, &[0; 4000]).is_none());
     }
 
     #[test]

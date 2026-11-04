@@ -1,12 +1,12 @@
-//! While a session is in full screen, the desktop's own shortcuts go to the
-//! PC: Alt+Tab switches apps there, and the Windows key opens its Start menu.
-//!
-//! Two things make that work on Wayland, with no change to egui:
-//! - the compositor is asked to hold its shortcuts back for this window
+//! A keyboard of our own on the window's Wayland connection, for what egui on
+//! Linux does not report, while a session is connected:
+//! - the lock keys: when Caps Lock or Num Lock change here, the PC follows, so
+//!   typing means the same on both;
+//! - in full screen, the desktop's own shortcuts go to the PC. The compositor
+//!   is asked to hold them back for this window
 //!   (`zwp_keyboard_shortcuts_inhibit_v1`), so Alt+Tab and the like arrive
-//!   here like any other key, through egui;
-//! - egui on Linux never reports the Windows key, so a keyboard of our own on
-//!   the window's connection listens for it and the few others egui drops.
+//!   through egui like any other key, and the Windows key, which egui never
+//!   reports, comes through this keyboard.
 //!
 //! Ctrl+Alt+Enter leaves full screen and hands the shortcuts back. On X11, or
 //! where the compositor does not offer this, the Keys menu still sends them.
@@ -64,10 +64,11 @@ pub fn remember_window(frame: &eframe::Frame) {
     });
 }
 
-/// The shortcuts held back for as long as this lives.
+/// The session's keyboard, for as long as this lives.
 pub struct KeyGrab {
     stop: Arc<AtomicBool>,
     active: Arc<AtomicBool>,
+    fullscreen: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -80,11 +81,16 @@ impl KeyGrab {
         };
         let stop = Arc::new(AtomicBool::new(false));
         let active = Arc::new(AtomicBool::new(false));
-        let (stopped, is_active) = (Arc::clone(&stop), Arc::clone(&active));
+        let fullscreen = Arc::new(AtomicBool::new(false));
+        let shared = Shared {
+            active: Arc::clone(&active),
+            fullscreen: Arc::clone(&fullscreen),
+        };
+        let stopped = Arc::clone(&stop);
         let thread = std::thread::Builder::new()
             .name("remoport-keys".to_string())
             .spawn(move || {
-                if let Err(why) = run(window, commander, &stopped, is_active) {
+                if let Err(why) = run(window, commander, &stopped, shared) {
                     logging::event(format_args!(
                         "Reserved keys stay with this desktop ({why}): use the Keys menu"
                     ));
@@ -94,6 +100,7 @@ impl KeyGrab {
         Some(Self {
             stop,
             active,
+            fullscreen,
             thread: Some(thread),
         })
     }
@@ -101,6 +108,12 @@ impl KeyGrab {
     /// Whether the session has the keyboard, so keys go to the PC.
     pub fn set_active(&self, active: bool) {
         self.active.store(active, Ordering::Relaxed);
+    }
+
+    /// Whether the window is in full screen, so the desktop's shortcuts are
+    /// held back and go to the PC.
+    pub fn set_fullscreen(&self, fullscreen: bool) {
+        self.fullscreen.store(fullscreen, Ordering::Relaxed);
     }
 }
 
@@ -133,11 +146,25 @@ fn name(code: Scancode) -> &'static str {
     }
 }
 
+/// Set by the session each frame.
+struct Shared {
+    active: Arc<AtomicBool>,
+    fullscreen: Arc<AtomicBool>,
+}
+
+/// Caps Lock and Num Lock from a Wayland `mods_locked` mask. XKB fixes Lock as
+/// its second real modifier, and layouts put Num Lock on Mod2, the fifth.
+const fn lock_keys(mods_locked: u32) -> (bool, bool) {
+    (mods_locked & (1 << 1) != 0, mods_locked & (1 << 4) != 0)
+}
+
 struct State {
     commander: Commander,
-    active: Arc<AtomicBool>,
+    shared: Shared,
     keyboard: Option<WlKeyboard>,
     held: Vec<Scancode>,
+    /// The lock keys the PC was last told about.
+    locks: Option<(bool, bool)>,
 }
 
 impl State {
@@ -160,7 +187,7 @@ fn run(
     window: WindowPointers,
     commander: Commander,
     stop: &AtomicBool,
-    active: Arc<AtomicBool>,
+    shared: Shared,
 ) -> Result<(), String> {
     // SAFETY: both addresses come from eframe's handles for the main window,
     // whose display and surface outlive this thread: `KeyGrab` joins it when
@@ -181,18 +208,31 @@ fn run(
     let seat: WlSeat = globals
         .bind(&handle, 3..=5, ())
         .map_err(|_| "no keyboard seat".to_string())?;
-    let manager: ZwpKeyboardShortcutsInhibitManagerV1 = globals
-        .bind(&handle, 1..=1, ())
-        .map_err(|_| "the desktop does not offer it".to_string())?;
-    let inhibitor = manager.inhibit_shortcuts(&surface, &seat, &handle, ());
+    // Without this the lock keys still work; only the shortcuts stay out of reach.
+    let manager: Option<ZwpKeyboardShortcutsInhibitManagerV1> =
+        globals.bind(&handle, 1..=1, ()).ok();
+    if manager.is_none() {
+        logging::event("This desktop keeps its reserved keys: use the Keys menu");
+    }
+    let mut inhibitor: Option<ZwpKeyboardShortcutsInhibitorV1> = None;
     let mut state = State {
         commander,
-        active,
+        shared,
         keyboard: None,
         held: Vec::new(),
+        locks: None,
     };
 
     while !stop.load(Ordering::Relaxed) {
+        let fullscreen = state.shared.fullscreen.load(Ordering::Relaxed);
+        if let (true, None, Some(manager)) = (fullscreen, &inhibitor, &manager) {
+            inhibitor = Some(manager.inhibit_shortcuts(&surface, &seat, &handle, ()));
+        } else if !fullscreen {
+            if let Some(held_back) = inhibitor.take() {
+                held_back.destroy();
+                logging::event("Reserved keys are back with this desktop");
+            }
+        }
         queue
             .dispatch_pending(&mut state)
             .map_err(|e| e.to_string())?;
@@ -210,17 +250,21 @@ fn run(
     }
 
     state.release_all();
-    inhibitor.destroy();
+    if let Some(held_back) = inhibitor.take() {
+        held_back.destroy();
+        logging::event("Reserved keys are back with this desktop");
+    }
     if let Some(keyboard) = state.keyboard.take() {
         keyboard.release();
     }
-    manager.destroy();
+    if let Some(manager) = manager {
+        manager.destroy();
+    }
     // A request only seats of this version know.
     if seat.version() >= 5 {
         seat.release();
     }
     let _ = connection.flush();
-    logging::event("Reserved keys are back with this desktop");
     Ok(())
 }
 
@@ -276,7 +320,13 @@ impl Dispatch<WlKeyboard, ()> for State {
                     return;
                 };
                 let pressed = key_state == wl_keyboard::KeyState::Pressed;
-                if pressed && state.active.load(Ordering::Relaxed) {
+                // In a window these keys are the desktop's own.
+                if !state.shared.fullscreen.load(Ordering::Relaxed) {
+                    if !pressed && state.held.contains(&code) {
+                        state.held.retain(|held| *held != code);
+                        state.send(code, false);
+                    }
+                } else if pressed && state.shared.active.load(Ordering::Relaxed) {
                     logging::event(format_args!("Sent {}", name(code)));
                     state.held.push(code);
                     state.send(code, true);
@@ -288,6 +338,23 @@ impl Dispatch<WlKeyboard, ()> for State {
                 } else if state.held.contains(&code) {
                     state.held.retain(|held| *held != code);
                     state.send(code, false);
+                }
+            }
+            wl_keyboard::Event::Modifiers { mods_locked, .. } => {
+                let locks = lock_keys(mods_locked);
+                if state.locks != Some(locks) {
+                    state.locks = Some(locks);
+                    let (caps, num) = locks;
+                    logging::event(format_args!(
+                        "Lock keys here, sent to the PC: Caps Lock {}, Num Lock {}",
+                        if caps { "on" } else { "off" },
+                        if num { "on" } else { "off" },
+                    ));
+                    state.commander.send(Command::LockKeys {
+                        caps,
+                        num,
+                        scroll: false,
+                    });
                 }
             }
             wl_keyboard::Event::Leave { .. } => state.release_all(),
@@ -332,6 +399,16 @@ impl Dispatch<ZwpKeyboardShortcutsInhibitorV1, ()> for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lock_keys_come_from_their_fixed_modifier_bits() {
+        assert_eq!(lock_keys(0), (false, false));
+        assert_eq!(lock_keys(0b0_0010), (true, false));
+        assert_eq!(lock_keys(0b1_0000), (false, true));
+        assert_eq!(lock_keys(0b1_0010), (true, true));
+        // Shift and Ctrl latched or locked say nothing about either.
+        assert_eq!(lock_keys(0b0_0101), (false, false));
+    }
 
     #[test]
     fn only_the_keys_egui_drops_are_taken_here() {

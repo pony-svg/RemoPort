@@ -5,6 +5,7 @@
 //!
 //! The formats follow RustConn's client (`rustconn-core`, GPL-3.0-or-later).
 
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use ironrdp_rdpeai::client::{AudioPacketSink, RdpeaiCaptureHandler};
@@ -54,15 +55,62 @@ impl MicrophonePackets {
     }
 }
 
+/// How the packets of one capture fared on their way to the PC, for the log:
+/// a queue that grows, or packets dropped, mean the connection cannot keep up.
+#[derive(Default)]
+pub(crate) struct Delivery {
+    sent: AtomicU64,
+    dropped: AtomicU64,
+    longest_queue: AtomicUsize,
+}
+
+impl Delivery {
+    pub(crate) fn queued(&self) {
+        self.sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn dropped(&self) {
+        self.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn waiting(&self, packets: usize) {
+        self.longest_queue.fetch_max(packets, Ordering::Relaxed);
+    }
+
+    fn reset(&self) {
+        self.sent.store(0, Ordering::Relaxed);
+        self.dropped.store(0, Ordering::Relaxed);
+        self.longest_queue.store(0, Ordering::Relaxed);
+    }
+
+    fn summary(&self, packet_bytes: usize, bytes_per_second: u32) -> String {
+        let per_packet = packet_bytes as f64 * 1000.0 / f64::from(bytes_per_second.max(1));
+        format!(
+            "Microphone: {} packets of {packet_bytes} bytes ({per_packet:.0} ms each), {} dropped, \
+             longest queue {} packets",
+            self.sent.load(Ordering::Relaxed),
+            self.dropped.load(Ordering::Relaxed),
+            self.longest_queue.load(Ordering::Relaxed),
+        )
+    }
+}
+
 pub(crate) struct Handler {
     input: Box<dyn SoundInput>,
     formats: Vec<AudioFormat>,
     sink: Arc<Mutex<Option<AudioPacketSink>>>,
     events: mpsc::Sender<Event>,
+    delivery: Arc<Delivery>,
+    /// The packet size and data rate of the capture under way.
+    capturing: (usize, u32),
 }
 
 impl Handler {
-    pub(crate) fn new(input: Box<dyn SoundInput>, events: mpsc::Sender<Event>) -> Self {
+    pub(crate) fn new(
+        input: Box<dyn SoundInput>,
+        events: mpsc::Sender<Event>,
+        delivery: Arc<Delivery>,
+    ) -> Self {
         Self {
             input,
             formats: vec![
@@ -78,6 +126,8 @@ impl Handler {
             ],
             sink: Arc::new(Mutex::new(None)),
             events,
+            delivery,
+            capturing: (0, 0),
         }
     }
 
@@ -155,6 +205,8 @@ impl RdpeaiCaptureHandler for Handler {
         if let Ok(mut slot) = self.sink.lock() {
             *slot = Some(sink);
         }
+        self.delivery.reset();
+        self.capturing = (packet_size, encode_format.n_avg_bytes_per_sec);
         // Nothing here compresses, so what is captured is what the PC decodes:
         // its choice among the formats offered. Windows describes its own
         // capture format differently (often WAVE_FORMAT_EXTENSIBLE).
@@ -182,6 +234,12 @@ impl RdpeaiCaptureHandler for Handler {
         let was_open = self.sink.lock().is_ok_and(|mut slot| slot.take().is_some());
         self.input.stop();
         let _ = self.events.send(Event::Microphone(false));
+        if was_open {
+            let (packet_bytes, rate) = self.capturing;
+            let _ = self
+                .events
+                .send(Event::Progress(self.delivery.summary(packet_bytes, rate)));
+        }
         let _ = self.events.send(Event::Progress(
             if was_open {
                 "The PC closed the microphone"
@@ -225,7 +283,7 @@ mod tests {
         let (events, received) = mpsc::channel();
         let recorder = Recorder::default();
         let started = Arc::clone(&recorder.started);
-        let mut handler = Handler::new(Box::new(recorder), events);
+        let mut handler = Handler::new(Box::new(recorder), events, Arc::default());
         assert!(
             handler
                 .supported_formats()
@@ -268,7 +326,7 @@ mod tests {
         let (events, received) = mpsc::channel();
         let recorder = Recorder::default();
         let format = Arc::clone(&recorder.format);
-        let mut handler = Handler::new(Box::new(recorder), events);
+        let mut handler = Handler::new(Box::new(recorder), events, Arc::default());
         let extensible = AudioFormat {
             format: WaveFormat::EXTENSIBLE,
             n_samples_per_sec: 48_000,
@@ -288,7 +346,7 @@ mod tests {
     #[test]
     fn what_the_pc_offers_is_logged_and_nothing_is_silently_refused() {
         let (events, received) = mpsc::channel();
-        let mut handler = Handler::new(Box::new(Recorder::default()), events);
+        let mut handler = Handler::new(Box::new(Recorder::default()), events, Arc::default());
         let offered = [pcm_format(2, 44_100, 16), pcm_format(2, 44_100, 8)];
         assert_eq!(handler.choose_formats(&offered), handler.formats);
         let adpcm = AudioFormat {
@@ -313,8 +371,28 @@ mod tests {
     }
 
     #[test]
+    fn the_log_says_how_the_packets_fared() {
+        let delivery = Delivery::default();
+        delivery.queued();
+        delivery.queued();
+        delivery.dropped();
+        delivery.waiting(3);
+        delivery.waiting(1);
+        assert_eq!(
+            delivery.summary(8820, 176_400),
+            "Microphone: 2 packets of 8820 bytes (50 ms each), 1 dropped, longest queue 3 packets"
+        );
+        delivery.reset();
+        assert!(delivery.summary(8820, 176_400).contains(": 0 packets"));
+    }
+
+    #[test]
     fn a_compressed_format_is_refused() {
-        let mut handler = Handler::new(Box::new(Recorder::default()), mpsc::channel().0);
+        let mut handler = Handler::new(
+            Box::new(Recorder::default()),
+            mpsc::channel().0,
+            Arc::default(),
+        );
         let adpcm = AudioFormat {
             format: WaveFormat::ADPCM,
             ..handler.supported_formats()[0].clone()

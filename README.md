@@ -14,8 +14,8 @@ side by side, and workspaces that bring in what your organization offers.
 > to the same session; the microphone and local folders can be offered per PC too.
 > PCs behind an RD Gateway are reached through it, and accounts that may not use NTLM
 > sign in with Kerberos. A session can span several screens, one window each, and go
-> full screen (Ctrl+Alt+Enter); a Keys menu sends the combinations this computer
-> keeps for itself, such as the Windows key or Alt+Tab. The interface is in English or
+> full screen (Ctrl+Alt+Enter), where the Windows key and Alt+Tab go to the PC on
+> Wayland; a Keys menu sends them from anywhere. The interface is in English or
 > Spanish, by the system's language. This still awaits testing against real servers.
 
 ## Security
@@ -79,9 +79,9 @@ te ofrece.
 > vuelve a la misma sesión, y el micrófono y carpetas locales también se ofrecen por
 > PC, a los PCs detrás de un RD Gateway se llega a través de él, y las cuentas que no
 > pueden usar NTLM inician sesión con Kerberos. Una sesión puede usar varias
-> pantallas, una ventana cada una, y pasar a pantalla completa (Ctrl+Alt+Enter); un
-> menú Teclas envía las combinaciones que este equipo se reserva, como la tecla
-> Windows o Alt+Tab. La interfaz está en inglés o español, según el idioma del
+> pantallas, una ventana cada una, y pasar a pantalla completa (Ctrl+Alt+Enter), donde
+> la tecla Windows y Alt+Tab van al PC en Wayland; un menú Teclas las envía desde
+> cualquier parte. La interfaz está en inglés o español, según el idioma del
 > sistema. Falta probarlo contra servidores reales.
 
 **Seguridad:** Remoport confirma la identidad del PC antes de usar tu contraseña (y te

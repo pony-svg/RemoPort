@@ -89,6 +89,11 @@ impl RemoportApp {
         }
     }
 
+    /// Ends any session, as the app closes.
+    pub fn end_session(&mut self) {
+        self.active_session = None;
+    }
+
     pub fn update(&mut self, ctx: &Context) {
         if !self.theme_applied {
             self.theme.apply(ctx);

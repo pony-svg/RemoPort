@@ -59,8 +59,12 @@ pub fn tf(template: &'static str, args: &[&dyn Display]) -> String {
 /// English and Spanish, by the English text.
 const TABLE: &[(&str, &str)] = &[
     (
-        "Ctrl+Alt+Enter leaves full screen",
-        "Ctrl+Alt+Enter sale de la pantalla completa",
+        "Ctrl+Alt+Enter leaves full screen; the bar shows at the top edge",
+        "Ctrl+Alt+Enter sale de la pantalla completa; la barra aparece en el borde superior",
+    ),
+    (
+        "⛶ Leave full screen",
+        "⛶ Salir de pantalla completa",
     ),
     (" · {} screens",
      " · {} pantallas"),

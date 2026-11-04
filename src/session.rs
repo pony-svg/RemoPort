@@ -6,6 +6,7 @@
 
 use crate::credentials::{self, Outcome, Pending};
 use crate::i18n::{t, tf};
+use crate::key_grab::KeyGrab;
 use crate::keymap;
 use crate::logging;
 use crate::model::{self, AudioPlaybackMode, DeviceBookmark};
@@ -19,6 +20,7 @@ use remoport_rdp::{
     IdentityProblem, MouseButton, Rect as RemoteRect, ResumeCookie, Session, SharedFolder,
     SoundInput, SoundOutput, TrustReply, TrustStore,
 };
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,6 +35,9 @@ const MAX_SIDE: u16 = 8192;
 
 /// Limit for each step of the connection; the user's own decisions aside.
 const STEP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How near the top edge the pointer brings up the full-screen bar, in points.
+const BAR_EDGE: f32 = 4.0;
 
 /// How long full screen says how to leave it, since the bar is hidden there.
 const FULLSCREEN_HINT: Duration = Duration::from_secs(5);
@@ -188,6 +193,14 @@ pub struct ActiveSession {
     refocus: bool,
     /// Until when full screen says how to leave it.
     fullscreen_hint_until: Option<Instant>,
+    /// The desktop's reserved keys, held back while in full screen.
+    key_grab: Option<KeyGrab>,
+    /// Asked for this stretch of full screen, whether it could be had or not.
+    key_grab_tried: bool,
+    /// Where the bar lies while it shows over a full-screen session.
+    bar_rect: Option<Rect>,
+    /// Keys pressed on the remote side and not yet released.
+    keys_down: HashSet<keymap::Scancode>,
     /// Windows the session spans, one per screen.
     screens: usize,
     /// Each window's drawing area in physical pixels, the main one first.
@@ -239,6 +252,10 @@ impl ActiveSession {
             microphone_muted: Arc::new(AtomicBool::new(false)),
             refocus: false,
             fullscreen_hint_until: None,
+            key_grab: None,
+            key_grab_tried: false,
+            bar_rect: None,
+            keys_down: HashSet::new(),
             screens,
             screen_px: vec![(1280, 720); screens],
             remote_monitors: Vec::new(),
@@ -251,10 +268,13 @@ impl ActiveSession {
         self.poll_keyring();
         self.poll_engine();
 
-        // In full screen the PC gets the whole screen; Ctrl+Alt+Enter brings
-        // the bar back.
+        // In full screen the PC gets the whole screen, and the bar shows over
+        // it when the pointer reaches the top edge.
         let fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
-        if !(fullscreen && matches!(self.phase, Phase::Connected)) {
+        if fullscreen && matches!(self.phase, Phase::Connected) {
+            self.floating_bar(&ui.ctx().clone(), on_disconnect);
+        } else {
+            self.bar_rect = None;
             egui::Frame::none()
                 .inner_margin(egui::Margin::symmetric(12.0, 6.0))
                 .show(ui, |ui| self.top_bar(ui, on_disconnect));
@@ -271,6 +291,17 @@ impl ActiveSession {
                 t("Apps published by workspaces are not available yet."),
             );
             return;
+        }
+
+        if !(fullscreen && matches!(self.phase, Phase::Connected)) {
+            self.key_grab = None;
+            self.key_grab_tried = false;
+        } else if !self.key_grab_tried {
+            self.key_grab_tried = true;
+            self.key_grab = self
+                .session
+                .as_ref()
+                .and_then(|session| KeyGrab::start(session.commander()));
         }
 
         if let Phase::Reconnecting {
@@ -313,6 +344,36 @@ impl ActiveSession {
     }
 
     // ── Top bar ─────────────────────────────────────────────────────────
+
+    /// The bar over a full-screen session: it shows when the pointer reaches
+    /// the top edge, and stays while the pointer or one of its menus is there.
+    /// It floats so that showing it does not resize the remote desktop.
+    fn floating_bar(&mut self, ctx: &Context, on_disconnect: &mut bool) {
+        let pointer = ctx.input(|i| i.pointer.latest_pos());
+        let at_edge = pointer.is_some_and(|p| p.y <= BAR_EDGE);
+        let on_bar = self
+            .bar_rect
+            .zip(pointer)
+            .is_some_and(|(bar, p)| bar.expand(BAR_EDGE).contains(p));
+        if !(at_edge || on_bar || ctx.memory(egui::Memory::any_popup_open)) {
+            self.bar_rect = None;
+            return;
+        }
+        let width = ctx.screen_rect().width();
+        let shown = egui::Area::new(egui::Id::new("session-bar"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos2(0.0, 0.0))
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(ctx.style().visuals.panel_fill)
+                    .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.set_width(width - 24.0);
+                        self.top_bar(ui, on_disconnect);
+                    });
+            });
+        self.bar_rect = Some(shown.response.rect);
+    }
 
     fn top_bar(&mut self, ui: &mut Ui, on_disconnect: &mut bool) {
         ui.horizontal(|ui| {
@@ -367,16 +428,27 @@ impl ActiveSession {
                         });
                     }
                 }
+                let fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
                 if connected
                     && ui
-                        .button(t("⛶ Full screen"))
+                        .button(if fullscreen {
+                            t("⛶ Leave full screen")
+                        } else {
+                            t("⛶ Full screen")
+                        })
                         .on_hover_text(t("Ctrl+Alt+Enter switches full screen on and off"))
                         .clicked()
                 {
                     ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
-                    logging::event("Full screen");
-                    self.fullscreen_hint_until = Some(Instant::now() + FULLSCREEN_HINT);
+                        .send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
+                    logging::event(if fullscreen {
+                        "Left full screen"
+                    } else {
+                        "Full screen"
+                    });
+                    if !fullscreen {
+                        self.fullscreen_hint_until = Some(Instant::now() + FULLSCREEN_HINT);
+                    }
                     self.refocus = true;
                 }
                 if connected {
@@ -941,6 +1013,10 @@ impl ActiveSession {
         self.modifiers = Modifiers::NONE;
         self.remote_copy = None;
         self.microphone_live = false;
+        self.key_grab = None;
+        self.key_grab_tried = false;
+        self.keys_down.clear();
+        self.bar_rect = None;
         self.remote_monitors.clear();
         self.requested_layout = None;
         self.pending_layout = None;
@@ -1133,6 +1209,15 @@ impl ActiveSession {
             });
         }
         self.sync_modifiers(focus.map_or(Modifiers::NONE, |(modifiers, _)| modifiers));
+        if let Some(grab) = &self.key_grab {
+            grab.set_active(focus.is_some());
+        }
+        // The session lost the keyboard: their releases will never arrive.
+        if focus.is_none() {
+            for key in std::mem::take(&mut self.keys_down) {
+                self.send_key(key, false);
+            }
+        }
         if let Some(text) = self.remote_copy.take() {
             // Only while the user works in the session: a PC copying on its
             // own does not get to replace this computer's clipboard.
@@ -1202,7 +1287,7 @@ impl ActiveSession {
             // On a dark plate: the remote desktop can be any color.
             let painter = ui.painter();
             let text = painter.layout_no_wrap(
-                t("Ctrl+Alt+Enter leaves full screen").to_string(),
+                t("Ctrl+Alt+Enter leaves full screen; the bar shows at the top edge").to_string(),
                 FontId::proportional(14.0),
                 Color32::WHITE,
             );
@@ -1256,8 +1341,9 @@ impl ActiveSession {
             ctx.set_cursor_icon(egui::CursorIcon::None);
         }
 
+        let bar = self.bar_rect.filter(|_| index == 0);
         let to_remote = |pos: egui::Pos2| -> Option<(u16, u16)> {
-            if !image.contains(pos) {
+            if !image.contains(pos) || bar.is_some_and(|bar| bar.contains(pos)) {
                 return None;
             }
             let x = (pos.x - image.min.x) / image.width() * width;
@@ -1332,17 +1418,31 @@ impl ActiveSession {
                     key,
                     physical_key,
                     pressed,
+                    modifiers,
                     ..
                 } if focused => {
+                    // Modifiers first: a key and its Ctrl can land in one frame.
+                    self.sync_modifiers(modifiers);
                     if let Some(code) = keymap::scancode(physical_key.unwrap_or(key)) {
-                        self.send_key(code, pressed);
+                        let strokes =
+                            strokes_for(&mut self.keys_down, code, pressed, modifiers.ctrl);
+                        for (key, down) in strokes {
+                            self.send_key(key, down);
+                        }
                     }
                 }
                 // egui turns these shortcuts into clipboard commands and
                 // swallows the key press; the release still arrives as a key.
-                Event::Copy if focused => self.send_key(keymap::C, true),
-                Event::Cut if focused => self.send_key(keymap::X, true),
+                Event::Copy if focused => {
+                    self.keys_down.insert(keymap::C);
+                    self.send_key(keymap::C, true);
+                }
+                Event::Cut if focused => {
+                    self.keys_down.insert(keymap::X);
+                    self.send_key(keymap::X, true);
+                }
                 Event::Paste(text) if focused => {
+                    self.keys_down.insert(keymap::V);
                     if self.bookmark.share_clipboard {
                         self.send(Command::Paste(ClipboardText::new(text)));
                     } else {
@@ -1608,6 +1708,28 @@ fn desktop_size((width, height): (u16, u16)) -> (u16, u16) {
     )
 }
 
+/// What to send for one key event. A release with no press behind it goes
+/// nowhere, since the PC has no press to match, except Ctrl+V: with nothing to
+/// paste on this computer egui keeps the press for itself, and the PC still
+/// gets the keystroke, for what it has on its own clipboard.
+fn strokes_for(
+    down: &mut HashSet<keymap::Scancode>,
+    key: keymap::Scancode,
+    pressed: bool,
+    ctrl: bool,
+) -> Vec<(keymap::Scancode, bool)> {
+    if pressed {
+        down.insert(key);
+        vec![(key, true)]
+    } else if down.remove(&key) {
+        vec![(key, false)]
+    } else if key == keymap::V && ctrl {
+        vec![(key, true), (key, false)]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Window `index`'s part of a desktop of `size`: where the PC says that
 /// screen lies when it said so for every screen; else the sizes asked for,
 /// side by side, once the desktop has taken them; else equal slices.
@@ -1705,6 +1827,32 @@ mod tests {
         assert_eq!(split_domain("jdoe@shd.gov.co"), (None, "jdoe@shd.gov.co"));
         assert_eq!(split_domain("jdoe"), (None, "jdoe"));
         assert_eq!(split_domain("\\jdoe"), (None, "\\jdoe"));
+    }
+
+    #[test]
+    fn only_a_swallowed_ctrl_v_is_sent_without_its_press() {
+        let mut down = HashSet::new();
+        assert_eq!(
+            strokes_for(&mut down, keymap::C, true, false),
+            vec![(keymap::C, true)]
+        );
+        assert_eq!(
+            strokes_for(&mut down, keymap::C, true, false),
+            vec![(keymap::C, true)]
+        );
+        assert_eq!(
+            strokes_for(&mut down, keymap::C, false, false),
+            vec![(keymap::C, false)]
+        );
+        // Ctrl+V with an empty clipboard here: only the release arrives.
+        assert_eq!(
+            strokes_for(&mut down, keymap::V, false, true),
+            vec![(keymap::V, true), (keymap::V, false)]
+        );
+        // The Enter of Ctrl+Alt+Enter, released after Ctrl and Alt: nothing.
+        assert!(strokes_for(&mut down, keymap::ESCAPE, false, false).is_empty());
+        assert!(strokes_for(&mut down, keymap::V, false, false).is_empty());
+        assert!(down.is_empty());
     }
 
     #[test]

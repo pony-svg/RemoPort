@@ -5,6 +5,7 @@ mod dialogs;
 mod fonts;
 mod i18n;
 mod icons;
+mod key_grab;
 mod keymap;
 mod logging;
 mod model;
@@ -39,7 +40,13 @@ impl AppRunner {
 }
 
 impl eframe::App for AppRunner {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Before the window goes: a session's key grab uses its connection.
+        self.app.end_session();
+    }
+
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        key_grab::remember_window(frame);
         // Draw the application
         self.app.update(ctx);
 

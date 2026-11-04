@@ -281,6 +281,16 @@ pub enum Command {
     Paste(ClipboardText),
 }
 
+/// Sends commands to a session from another thread.
+#[derive(Clone)]
+pub struct Commander(tokio::sync::mpsc::UnboundedSender<Command>);
+
+impl Commander {
+    pub fn send(&self, command: Command) {
+        let _ = self.0.send(command);
+    }
+}
+
 /// A connection running on its own thread.
 pub struct Session {
     commands: tokio::sync::mpsc::UnboundedSender<Command>,
@@ -327,6 +337,12 @@ impl Session {
 
     pub fn send(&self, command: Command) {
         let _ = self.commands.send(command);
+    }
+
+    /// A handle for sending commands from another thread.
+    #[must_use]
+    pub fn commander(&self) -> Commander {
+        Commander(self.commands.clone())
     }
 
     /// Ends the session, at any stage, and waits for its thread.

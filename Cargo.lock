@@ -4887,10 +4887,15 @@ dependencies = [
  "egui",
  "image",
  "keyring",
+ "nix 0.29.0",
+ "raw-window-handle 0.6.2",
  "remoport-rdp",
  "serde",
  "serde_json",
  "uuid",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols 0.32.13",
  "zeroize",
 ]
 

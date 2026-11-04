@@ -69,6 +69,7 @@ pub(crate) async fn run(
     });
 
     let lost = |e: std::io::Error| Error::ConnectionLost(e.to_string());
+    let mut work = Workload::new(events.clone());
     loop {
         let holding = clipboard.as_ref().is_some_and(Clipboard::holding);
         let release_at = clipboard
@@ -133,6 +134,7 @@ pub(crate) async fn run(
             }
             read = reader.read_pdu() => {
                 let (action, payload) = read.map_err(|e| Error::ConnectionLost(e.to_string()))?;
+                let began = Instant::now();
                 match stage.process(&mut image, action, &payload, None) {
                     Ok(outputs) => {
                         for output in outputs {
@@ -160,8 +162,63 @@ pub(crate) async fn run(
                         apply_command(command, &mut stage, &mut image, &mut writer, &mut input, events).await;
                     }
                 }
+                work.add(began.elapsed());
             }
         }
+    }
+}
+
+/// How long this thread is taken up by each message from the PC, mostly
+/// decoding pictures. While it is, nothing else moves, the PC's sound included.
+/// Told to the log when the session ends.
+struct Workload {
+    events: mpsc::Sender<Event>,
+    began: Instant,
+    messages: u64,
+    busy: Duration,
+    longest: Duration,
+    over_20_ms: u64,
+    over_50_ms: u64,
+}
+
+impl Workload {
+    fn new(events: mpsc::Sender<Event>) -> Self {
+        Self {
+            events,
+            began: Instant::now(),
+            messages: 0,
+            busy: Duration::ZERO,
+            longest: Duration::ZERO,
+            over_20_ms: 0,
+            over_50_ms: 0,
+        }
+    }
+
+    fn add(&mut self, spent: Duration) {
+        self.messages += 1;
+        self.busy += spent;
+        self.longest = self.longest.max(spent);
+        self.over_20_ms += u64::from(spent > Duration::from_millis(20));
+        self.over_50_ms += u64::from(spent > Duration::from_millis(50));
+    }
+
+    fn summary(&self, session: Duration) -> String {
+        format!(
+            "Session: {} messages from the PC took {:.0}% of the thread, longest {} ms, {} over \
+             20 ms, {} over 50 ms",
+            self.messages,
+            self.busy.as_secs_f64() * 100.0 / session.as_secs_f64().max(0.001),
+            self.longest.as_millis(),
+            self.over_20_ms,
+            self.over_50_ms,
+        )
+    }
+}
+
+impl Drop for Workload {
+    fn drop(&mut self) {
+        let summary = self.summary(self.began.elapsed());
+        let _ = self.events.send(Event::Progress(summary));
     }
 }
 
@@ -651,6 +708,19 @@ mod tests {
         assert!(pointer_shape(2, 2, 0, 0, &two_by_two[..15]).is_none());
         assert!(pointer_shape(0, 2, 0, 0, &[]).is_none());
         assert!(pointer_shape(1000, 1, 0, 0, &[0; 4000]).is_none());
+    }
+
+    #[test]
+    fn the_log_says_how_much_of_the_thread_the_pc_takes() {
+        let mut work = Workload::new(mpsc::channel().0);
+        work.add(Duration::from_millis(10));
+        work.add(Duration::from_millis(30));
+        work.add(Duration::from_millis(60));
+        assert_eq!(
+            work.summary(Duration::from_millis(1000)),
+            "Session: 3 messages from the PC took 10% of the thread, longest 60 ms, 2 over 20 ms, \
+             1 over 50 ms"
+        );
     }
 
     #[test]

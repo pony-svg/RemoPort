@@ -4,10 +4,13 @@
 //! The formats follow RustConn's client (`rustconn-core`, GPL-3.0-or-later).
 
 use std::borrow::Cow;
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use ironrdp_rdpsnd::client::RdpsndClientHandler;
 use ironrdp_rdpsnd::pdu::{AudioFormat, AudioFormatFlags, PitchPdu, VolumePdu, WaveFormat};
+
+use crate::Event;
 
 /// Where the PC's sound goes. Called on the connection's thread, so a call
 /// must not block for long.
@@ -28,10 +31,41 @@ pub(crate) struct Handler {
     output: Box<dyn SoundOutput>,
     formats: Vec<AudioFormat>,
     samples: Vec<i16>,
+    events: mpsc::Sender<Event>,
+    arrivals: Arrivals,
+}
+
+/// How the blocks of one sound arrived, for the log.
+#[derive(Default)]
+struct Arrivals {
+    last: Option<Instant>,
+    blocks: u64,
+    seconds: f64,
+    longest_wait: Duration,
+}
+
+impl Arrivals {
+    fn block(&mut self, now: Instant, seconds: f64) {
+        if let Some(last) = self.last {
+            self.longest_wait = self.longest_wait.max(now - last);
+        }
+        self.last = Some(now);
+        self.blocks += 1;
+        self.seconds += seconds;
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "Sound from the PC: {} blocks of {:.0} ms on average, longest wait between them {} ms",
+            self.blocks,
+            self.seconds * 1000.0 / self.blocks.max(1) as f64,
+            self.longest_wait.as_millis(),
+        )
+    }
 }
 
 impl Handler {
-    pub(crate) fn new(output: Box<dyn SoundOutput>) -> Self {
+    pub(crate) fn new(output: Box<dyn SoundOutput>, events: mpsc::Sender<Event>) -> Self {
         let pcm = |channels: u16, rate: u32| AudioFormat {
             format: WaveFormat::PCM,
             n_channels: channels,
@@ -51,6 +85,8 @@ impl Handler {
                 pcm(1, 44_100),
             ],
             samples: Vec::new(),
+            events,
+            arrivals: Arrivals::default(),
         }
     }
 }
@@ -84,6 +120,11 @@ impl RdpsndClientHandler for Handler {
                 .iter()
                 .map(|pair| i16::from_le_bytes([pair[0], pair[1]])),
         );
+        let per_second = f64::from(format.n_samples_per_sec) * f64::from(format.n_channels);
+        self.arrivals.block(
+            Instant::now(),
+            self.samples.len() as f64 / per_second.max(1.0),
+        );
         self.output
             .play(format.n_samples_per_sec, format.n_channels, &self.samples);
     }
@@ -101,6 +142,10 @@ impl RdpsndClientHandler for Handler {
     fn set_pitch(&mut self, _pitch: PitchPdu) {}
 
     fn close(&mut self) {
+        if self.arrivals.blocks > 0 {
+            let _ = self.events.send(Event::Progress(self.arrivals.summary()));
+        }
+        self.arrivals = Arrivals::default();
         self.output.stop();
     }
 }
@@ -126,9 +171,22 @@ mod tests {
     }
 
     #[test]
+    fn the_log_says_how_the_blocks_arrived() {
+        let mut arrivals = Arrivals::default();
+        let start = Instant::now();
+        arrivals.block(start, 0.1);
+        arrivals.block(start + Duration::from_millis(100), 0.1);
+        arrivals.block(start + Duration::from_millis(350), 0.1);
+        assert_eq!(
+            arrivals.summary(),
+            "Sound from the PC: 3 blocks of 100 ms on average, longest wait between them 250 ms"
+        );
+    }
+
+    #[test]
     fn only_16_bit_pcm_is_offered_and_played() {
         let played = Arc::new(Mutex::new(Vec::new()));
-        let mut handler = Handler::new(Box::new(Recorder(played.clone())));
+        let mut handler = Handler::new(Box::new(Recorder(played.clone())), mpsc::channel().0);
         assert!(
             handler
                 .get_formats()

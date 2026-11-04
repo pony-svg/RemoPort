@@ -146,7 +146,7 @@ pub(crate) async fn connect(
         connector
             .static_channels
             .insert(ironrdp_rdpsnd::client::Rdpsnd::new(Box::new(
-                sound::Handler::new(output),
+                sound::Handler::new(output, events.clone()),
             )));
     }
     // The device channel carries the shared folders, and Windows sends sound

@@ -26,18 +26,29 @@ const MAX_QUEUED_SECONDS: usize = 1;
 /// once it has waited this long.
 const CUSHION: Duration = Duration::from_millis(120);
 
+/// The most the cushion grows to, when the sound keeps being cut.
+const MAX_CUSHION: Duration = Duration::from_millis(480);
+
+/// Sound resuming within this long of running dry was cut, not over.
+const GAP: Duration = Duration::from_secs(1);
+
 #[derive(Default)]
 struct Buffer {
     samples: VecDeque<i16>,
     max: usize,
-    /// Samples to gather before playing.
+    /// Samples per second, across the channels.
+    per_second: usize,
+    /// Samples to gather before playing. Kept while the session lasts, since
+    /// what the connection needs does not change from one sound to the next.
     cushion: usize,
     playing: bool,
     /// When the sound now gathering began.
     gathering_since: Option<Instant>,
-    /// For the log: samples played, and how often the sound ran dry.
+    /// When the sound last ran out.
+    dry_since: Option<Instant>,
+    /// For the log: samples played, and how often the sound was cut.
     played: u64,
-    ran_dry: u64,
+    gaps: u64,
 }
 
 impl Buffer {
@@ -48,14 +59,29 @@ impl Buffer {
         if !self.playing && self.gathering_since.is_none() {
             self.gathering_since = Some(Instant::now());
         }
+        if self
+            .dry_since
+            .take()
+            .is_some_and(|since| since.elapsed() < GAP)
+        {
+            self.gaps += 1;
+            let limit = self.per_second * MAX_CUSHION.as_millis() as usize / 1000;
+            self.cushion = (self.cushion * 3 / 2).min(limit);
+        }
+    }
+
+    /// The cushion, as a time.
+    fn cushion_time(&self) -> Duration {
+        Duration::from_secs_f64(self.cushion as f64 / self.per_second.max(1) as f64)
     }
 
     /// Whether to play now: enough has gathered, or it has waited long enough.
     fn ready(&mut self) -> bool {
         if !self.playing && !self.samples.is_empty() {
+            let cushion = self.cushion_time();
             let waited = self
                 .gathering_since
-                .is_some_and(|since| since.elapsed() >= CUSHION);
+                .is_some_and(|since| since.elapsed() >= cushion);
             if waited || self.samples.len() >= self.cushion {
                 self.playing = true;
                 self.gathering_since = None;
@@ -68,8 +94,9 @@ impl Buffer {
         self.samples.clear();
         self.playing = false;
         self.gathering_since = None;
+        self.dry_since = None;
         self.played = 0;
-        self.ran_dry = 0;
+        self.gaps = 0;
     }
 }
 
@@ -102,7 +129,10 @@ impl Speaker {
         if let Ok(mut buffer) = self.buffer.lock() {
             let per_second = rate as usize * usize::from(channels);
             buffer.max = per_second * MAX_QUEUED_SECONDS;
-            buffer.cushion = per_second * CUSHION.as_millis() as usize / 1000;
+            if buffer.per_second != per_second {
+                buffer.per_second = per_second;
+                buffer.cushion = per_second * CUSHION.as_millis() as usize / 1000;
+            }
         }
         let buffer = Arc::clone(&self.buffer);
         let volume = Arc::clone(&self.volume);
@@ -149,9 +179,10 @@ impl SoundOutput for Speaker {
             if let (Some((rate, channels)), true) = (self.format, buffer.played > 0) {
                 let per_second = f64::from(rate) * f64::from(channels);
                 logging::event(format_args!(
-                    "Sound: {:.1} s played, ran dry {} times (a sound's own end counts as one)",
+                    "Sound: {:.1} s played, cut {} times, cushion now {} ms",
                     buffer.played as f64 / per_second.max(1.0),
-                    buffer.ran_dry,
+                    buffer.gaps,
+                    buffer.cushion_time().as_millis(),
                 ));
             }
             buffer.reset();
@@ -245,7 +276,7 @@ fn fill<T: Copy>(
                 // Dry: gather a cushion again, instead of stuttering on each block.
                 if buffer.playing {
                     buffer.playing = false;
-                    buffer.ran_dry += 1;
+                    buffer.dry_since = Some(Instant::now());
                 }
                 silence
             }
@@ -526,13 +557,16 @@ mod tests {
         fill(&mut out, &buffer, &volume, |v| v as i16, 0);
         assert_eq!(out, [150, 0, 0]);
         let buffer = buffer.lock().unwrap();
-        assert_eq!((buffer.played, buffer.ran_dry), (3, 1));
+        assert_eq!(buffer.played, 3);
+        assert!(buffer.dry_since.is_some());
+        assert_eq!(buffer.gaps, 0, "the end of a sound is not a cut");
     }
 
     #[test]
     fn sound_gathers_a_cushion_first_and_again_after_running_dry() {
         let buffer = Mutex::new(Buffer {
             max: 100,
+            per_second: 1000,
             cushion: 4,
             ..Buffer::default()
         });
@@ -546,23 +580,49 @@ mod tests {
         assert_eq!(play(2), [0, 0], "too little to start");
         buffer.lock().unwrap().push(&[100, 100]);
         assert_eq!(play(5), [50, 50, 50, 50, 0], "started, and ran dry");
-        // Dry: a late block alone does not restart it, with its next gap ahead.
+        // Cut: the cushion grew to 6, and a late block alone does not restart it.
         buffer.lock().unwrap().push(&[100]);
+        assert_eq!(buffer.lock().unwrap().cushion, 6);
         assert_eq!(play(1), [0]);
-        buffer.lock().unwrap().push(&[100, 100, 100]);
-        assert_eq!(play(4), [50, 50, 50, 50]);
+        buffer.lock().unwrap().push(&[100; 5]);
+        assert_eq!(play(6), [50; 6]);
+    }
+
+    #[test]
+    fn a_real_cut_grows_the_cushion_and_the_end_of_a_sound_does_not() {
+        let mut buffer = Buffer {
+            max: 100_000,
+            per_second: 1000,
+            cushion: 120,
+            ..Buffer::default()
+        };
+        // Sound resumes right after running out: it was cut.
+        buffer.dry_since = Some(Instant::now());
+        buffer.push(&[1]);
+        assert_eq!((buffer.gaps, buffer.cushion), (1, 180));
+        // A new sound long after the last: nothing was cut.
+        buffer.dry_since = Instant::now().checked_sub(GAP * 2);
+        buffer.push(&[1]);
+        assert_eq!((buffer.gaps, buffer.cushion), (1, 180));
+        // It stops growing at its limit.
+        for _ in 0..10 {
+            buffer.dry_since = Some(Instant::now());
+            buffer.push(&[1]);
+        }
+        assert_eq!(buffer.cushion, 480);
     }
 
     #[test]
     fn a_sound_shorter_than_the_cushion_still_plays() {
         let buffer = Mutex::new(Buffer {
             max: 100,
+            per_second: 1000,
             cushion: 1000,
             ..Buffer::default()
         });
         let volume = half_volume();
         buffer.lock().unwrap().push(&[100, 100]);
-        buffer.lock().unwrap().gathering_since = Instant::now().checked_sub(CUSHION);
+        buffer.lock().unwrap().gathering_since = Instant::now().checked_sub(Duration::from_secs(1));
         let mut out = [9i16; 3];
         fill(&mut out, &buffer, &volume, |v| v as i16, 0);
         assert_eq!(out, [50, 50, 0]);

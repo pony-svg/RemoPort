@@ -33,10 +33,6 @@ use crate::{
     microphone, net, sound,
 };
 
-/// Microphone packets waiting for the session; beyond this, sound is dropped
-/// rather than piling up behind a slow link.
-const MICROPHONE_QUEUE: usize = 64;
-
 /// How long the user has to decide about a PC's identity.
 const IDENTITY_DECISION: Duration = Duration::from_secs(300);
 
@@ -187,35 +183,9 @@ pub(crate) async fn connect(
     // Microphone packets are sent between the PC's turns, so the channel
     // queues them for the session.
     let microphone = input.map(|input| {
-        let (queue, packets) = tokio::sync::mpsc::channel(MICROPHONE_QUEUE);
-        let delivery = Arc::new(microphone::Delivery::default());
-        let counted = Arc::clone(&delivery);
-        let uplink: ironrdp_rdpeai::client::DvcUplink = Box::new(move |_channel, messages| {
-            // A full queue drops this packet: a gap, not a growing delay.
-            match queue.try_send(messages) {
-                Ok(()) => {
-                    counted.queued();
-                    Ok(())
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    counted.dropped();
-                    Ok(())
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    Err(ironrdp_pdu::pdu_other_err!("the session has ended"))
-                }
-            }
-        });
-        drdynvc = std::mem::take(&mut drdynvc).with_dynamic_channel(
-            ironrdp_rdpeai::client::RdpeaiClient::new(
-                Box::new(microphone::Handler::new(
-                    input,
-                    events.clone(),
-                    Arc::clone(&delivery),
-                )),
-                uplink,
-            ),
-        );
+        let (with_microphone, packets, delivery) =
+            microphone::register(std::mem::take(&mut drdynvc), input, events.clone());
+        drdynvc = with_microphone;
         (packets, delivery)
     });
     // Advertising the pipeline early is what makes Windows open it at all.

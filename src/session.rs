@@ -1407,14 +1407,16 @@ impl ActiveSession {
         let region = self.region(index);
         // The picture at its own size in this window.
         let size = region.map(|r| vec2(f32::from(r.width), f32::from(r.height)) / per_point);
-        let (rect, scrolled) = match size.filter(|_| !self.bookmark.fit_to_window) {
-            Some(size) => scroll_bars(ui, index, size),
-            None => (
-                ui.allocate_exact_size(ui.available_size(), Sense::hover())
-                    .0,
-                Vec2::ZERO,
-            ),
-        };
+        let room = ui.available_size();
+        let (rect, scrolled) =
+            match size.filter(|size| !self.bookmark.fit_to_window && !fits_window(*size, room)) {
+                Some(size) => scroll_bars(ui, index, size),
+                None => (
+                    ui.allocate_exact_size(ui.available_size(), Sense::hover())
+                        .0,
+                    Vec2::ZERO,
+                ),
+            };
         // An id of its own: an automatic one depends on what came before in the
         // window, which changes as the bar hides in full screen, and with it
         // the screen would lose the keyboard on every switch.
@@ -1943,27 +1945,25 @@ fn desktop_size((width, height): (u16, u16)) -> (u16, u16) {
     )
 }
 
-/// Scroll bars for a picture that may not fit the window. Returns the space
+/// Whether a picture fits the window, to within a pixel, with no scroll bars.
+/// Decided here because a bar takes up room: egui asks if the picture fits what
+/// its bars leave, so a picture that came to fit the window would keep them.
+fn fits_window(size: Vec2, room: Vec2) -> bool {
+    size.x < room.x + 1.0 && size.y < room.y + 1.0
+}
+
+/// Scroll bars for a picture that does not fit the window. Returns the space
 /// left for the picture and how far it is scrolled. The wheel stays the PC's.
 fn scroll_bars(ui: &mut Ui, index: usize, size: Vec2) -> (Rect, Vec2) {
     ui.ctx().input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
     // Beside the picture rather than over it, where a click belongs to the PC.
     ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-    let room = ui.available_size();
-    // A picture that fits to within a pixel shows no bars.
-    let side = |picture: f32, room: f32| {
-        if (picture - room).abs() < 1.0 {
-            room
-        } else {
-            picture
-        }
-    };
     let output = egui::ScrollArea::both()
         .id_source(("session-scroll", index))
         .auto_shrink(false)
         .drag_to_scroll(false)
         .show(ui, |ui| {
-            ui.allocate_space(vec2(side(size.x, room.x), side(size.y, room.y)));
+            ui.allocate_space(size);
         });
     (output.inner_rect, output.state.offset)
 }
@@ -2360,6 +2360,16 @@ mod tests {
         );
         assert_eq!(scrolled.size(), vec2(1600.0, 300.0));
         assert_eq!(scrolled.min, pos2(10.0 - 100.0, area.center().y - 150.0));
+    }
+
+    #[test]
+    fn a_picture_that_fits_the_window_needs_no_scroll_bars() {
+        let room = vec2(1536.0, 960.0);
+        assert!(fits_window(room, room));
+        assert!(fits_window(vec2(1536.4, 960.4), room));
+        assert!(fits_window(vec2(800.0, 600.0), room));
+        assert!(!fits_window(vec2(1537.0, 960.0), room));
+        assert!(!fits_window(vec2(1536.0, 961.0), room));
     }
 
     #[test]

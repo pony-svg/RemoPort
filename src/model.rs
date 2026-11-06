@@ -87,6 +87,10 @@ pub struct DeviceBookmark {
     /// How many of this computer's screens the session uses, one window each.
     #[serde(default = "one_screen")]
     pub screens: u8,
+    /// The display scale for this PC as a percentage; without one it follows
+    /// this computer's screen.
+    #[serde(default)]
+    pub scale_percent: Option<u16>,
     pub hidpi_full_resolution: bool,
     pub audio_playback: AudioPlaybackMode,
     pub redirect_microphones: bool,
@@ -140,6 +144,7 @@ impl DeviceBookmark {
             color_quality: ColorQuality::High32Bit,
             fit_to_window: true,
             screens: 1,
+            scale_percent: None,
             hidpi_full_resolution: true,
             audio_playback: AudioPlaybackMode::LocalDevice,
             redirect_microphones: false,
@@ -327,6 +332,17 @@ mod tests {
         fields.insert("redirect_clipboard".into(), true.into());
         let loaded: DeviceBookmark = serde_json::from_value(old).expect("deserialize");
         assert!(!loaded.share_clipboard);
+    }
+
+    #[test]
+    fn a_pc_saved_before_follows_this_screens_scale() {
+        let pc = DeviceBookmark::new("pc".into(), String::new(), String::new());
+        let mut old = serde_json::to_value(&pc).expect("to JSON");
+        old.as_object_mut()
+            .expect("an object")
+            .remove("scale_percent");
+        let read: DeviceBookmark = serde_json::from_value(old).expect("from JSON");
+        assert_eq!(read.scale_percent, None);
     }
 
     #[test]

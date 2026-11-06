@@ -69,6 +69,9 @@ pub struct ConnectConfig {
     /// The size of each screen, left to right, when the session spans
     /// several; `width` and `height` are then ignored. Empty for one screen.
     pub monitors: Vec<(u16, u16)>,
+    /// The scale the PC should display at, as a percentage: 125 for 125%.
+    /// RDP allows 100 to 500; anything else goes to the nearest of those.
+    pub scale: u32,
     /// Lets this PC sign in on its own screen when it does not offer NLA.
     pub allow_without_nla: bool,
     /// Where the certificates the user trusted are kept.
@@ -292,9 +295,15 @@ pub enum Command {
     Resize {
         width: u16,
         height: u16,
+        /// The display scale, as in [`ConnectConfig::scale`].
+        scale: u32,
     },
-    /// The size of each screen, left to right, for a session on several.
-    Layout(Vec<(u16, u16)>),
+    /// The size of each screen, left to right, for a session on several,
+    /// and the display scale for all of them.
+    Layout {
+        sizes: Vec<(u16, u16)>,
+        scale: u32,
+    },
     CtrlAltDel,
     /// The lock keys on this computer, so typing means the same on the PC.
     LockKeys {

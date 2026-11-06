@@ -7,6 +7,9 @@ use crate::theme::Theme;
 use egui::{vec2, Align2, Color32, Context, Ui, Window};
 use uuid::Uuid;
 
+/// The display scales offered for a PC, besides following this screen.
+const SCALES: [u16; 7] = [100, 125, 150, 175, 200, 250, 300];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditPcTab {
     General,
@@ -27,6 +30,7 @@ pub struct AddEditPcDialog {
     pub color_quality: ColorQuality,
     pub fit_to_window: bool,
     pub screens: u8,
+    pub scale_percent: Option<u16>,
     pub hidpi_full_resolution: bool,
     pub audio_playback: AudioPlaybackMode,
     pub redirect_microphones: bool,
@@ -64,6 +68,7 @@ impl Default for AddEditPcDialog {
             color_quality: ColorQuality::High32Bit,
             fit_to_window: true,
             screens: 1,
+            scale_percent: None,
             hidpi_full_resolution: true,
             audio_playback: AudioPlaybackMode::LocalDevice,
             redirect_microphones: false,
@@ -119,6 +124,7 @@ impl AddEditPcDialog {
         self.color_quality = bookmark.color_quality;
         self.fit_to_window = bookmark.fit_to_window;
         self.screens = bookmark.screens.clamp(1, 4);
+        self.scale_percent = bookmark.scale_percent;
         self.hidpi_full_resolution = bookmark.hidpi_full_resolution;
         self.audio_playback = bookmark.audio_playback;
         self.redirect_microphones = bookmark.redirect_microphones;
@@ -225,6 +231,7 @@ impl AddEditPcDialog {
                                 bookmark.color_quality = self.color_quality;
                                 bookmark.fit_to_window = self.fit_to_window;
                                 bookmark.screens = self.screens;
+                                bookmark.scale_percent = self.scale_percent;
                                 bookmark.hidpi_full_resolution = self.hidpi_full_resolution;
                                 bookmark.audio_playback = self.audio_playback;
                                 bookmark.redirect_microphones = self.redirect_microphones;
@@ -399,6 +406,35 @@ impl AddEditPcDialog {
                     "3840 x 2160 (4K UHD)",
                 );
             });
+
+        ui.add_space(8.0);
+
+        let this_screen = tf(
+            "Same as this screen ({}%)",
+            &[&crate::session::screen_scale(ui.ctx())],
+        );
+        egui::ComboBox::from_label(t("Scale"))
+            .selected_text(match self.scale_percent {
+                None => this_screen.clone(),
+                Some(percent) => format!("{percent}%"),
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.scale_percent, None, this_screen);
+                for percent in SCALES {
+                    ui.selectable_value(
+                        &mut self.scale_percent,
+                        Some(percent),
+                        format!("{percent}%"),
+                    );
+                }
+            });
+        ui.label(
+            egui::RichText::new(t(
+                "Some programs already open on the PC may not adapt until you reopen them.",
+            ))
+            .size(11.5)
+            .weak(),
+        );
 
         ui.add_space(8.0);
 

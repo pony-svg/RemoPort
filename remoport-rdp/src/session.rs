@@ -470,8 +470,8 @@ async fn apply_command(
             send_input(stage, image, writer, &[event]).await;
             return;
         }
-        Command::Layout(sizes) => {
-            let frame = monitor_layout(&sizes)
+        Command::Layout { sizes, scale } => {
+            let frame = monitor_layout(&sizes, scale)
                 .map_err(|e| e.to_string())
                 .and_then(|layout| match stage.encode_monitor_layout(&layout) {
                     Some(result) => result.map_err(|e| e.to_string()),
@@ -487,8 +487,12 @@ async fn apply_command(
             }
             return;
         }
-        Command::Resize { width, height } => {
-            match stage.encode_resize(u32::from(width), u32::from(height), None, None) {
+        Command::Resize {
+            width,
+            height,
+            scale,
+        } => {
+            match stage.encode_resize(u32::from(width), u32::from(height), Some(scale), None) {
                 Some(Ok(frame)) => {
                     let _ = writer.write_all(&frame).await;
                 }
@@ -570,7 +574,9 @@ fn pointer_shape(
 /// first one primary.
 fn monitor_layout(
     sizes: &[(u16, u16)],
+    scale: u32,
 ) -> Result<DisplayControlMonitorLayout, ironrdp_core::EncodeError> {
+    let (desktop_scale, device_scale) = crate::connect::scale_factors(scale);
     let mut left = 0i32;
     let mut entries = Vec::with_capacity(sizes.len());
     for (index, &(width, height)) in sizes.iter().enumerate() {
@@ -581,7 +587,11 @@ fn monitor_layout(
         } else {
             MonitorLayoutEntry::new_secondary(width, height)?.with_position(left, 0)?
         };
-        entries.push(entry);
+        entries.push(
+            entry
+                .with_desktop_scale_factor(desktop_scale)?
+                .with_device_scale_factor(device_scale),
+        );
         left += i32::try_from(width).unwrap_or(i32::MAX);
     }
     DisplayControlMonitorLayout::new(&entries)
@@ -725,12 +735,16 @@ mod tests {
 
     #[test]
     fn screens_are_laid_out_left_to_right() {
-        let layout = monitor_layout(&[(1920, 1080), (1280, 1024)]).expect("layout");
+        let layout = monitor_layout(&[(1920, 1080), (1280, 1024)], 150).expect("layout");
         let encoded = format!("{layout:?}");
         assert!(
             encoded.contains("1920") && encoded.contains("1280"),
             "{encoded}"
         );
+        for screen in layout.monitors() {
+            assert_eq!(screen.desktop_scale_factor(), Some(150));
+            assert_eq!(screen.device_scale_factor().map(|d| d.value()), Some(140));
+        }
         let rects = monitor_rects(&[
             ironrdp_pdu::gcc::Monitor {
                 left: -1280,

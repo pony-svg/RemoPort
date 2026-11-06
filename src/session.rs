@@ -188,6 +188,10 @@ pub struct ActiveSession {
     graphics: Option<String>,
     /// The drawing area's size in physical pixels, for the next connection.
     canvas_px: (u16, u16),
+    /// This computer's screen scale as a percentage, as last seen.
+    screen_scale: u32,
+    /// The scale the PC was last told.
+    sent_scale: u32,
     /// A size the window settled on, and since when, before it is requested.
     pending_size: Option<((u16, u16), Instant)>,
     /// The size last requested, until the server answers with it.
@@ -265,6 +269,8 @@ impl ActiveSession {
             screen: None,
             graphics: None,
             canvas_px: (1280, 720),
+            screen_scale: 100,
+            sent_scale: 100,
             pending_size: None,
             requested_size: None,
             display_control: false,
@@ -715,6 +721,16 @@ impl ActiveSession {
         let username = self.username.trim().to_string();
         let (domain, user) = split_domain(&username);
         let (width, height) = desktop_size(self.canvas_px);
+        let scale = self.wanted_scale();
+        self.sent_scale = scale;
+        logging::event(format_args!(
+            "Display scale for the PC: {scale}% ({})",
+            if self.bookmark.scale_percent.is_some() {
+                "set for this PC"
+            } else {
+                "same as this screen"
+            },
+        ));
         let password = self.session_password.clone().unwrap_or_default();
         if let Some(first) = self.screen_px.first_mut() {
             *first = self.canvas_px;
@@ -803,6 +819,7 @@ impl ActiveSession {
             width,
             height,
             monitors,
+            scale,
             allow_without_nla: self.bookmark.allow_without_nla,
             trust_store,
             timeout,
@@ -1235,6 +1252,14 @@ impl ActiveSession {
     fn measure_canvas(&mut self, ui: &Ui) {
         let px = ui.available_size() * ui.ctx().pixels_per_point();
         self.canvas_px = (to_u16(px.x), to_u16(px.y));
+        self.screen_scale = screen_scale(ui.ctx());
+    }
+
+    /// The scale for the PC: the one set for it, or else this screen's.
+    fn wanted_scale(&self) -> u32 {
+        self.bookmark
+            .scale_percent
+            .map_or(self.screen_scale, u32::from)
     }
 
     /// The remote desktop: the main window shows the first screen, and each
@@ -1303,6 +1328,9 @@ impl ActiveSession {
         let px = (to_u16(px.x), to_u16(px.y));
         if index == 0 {
             self.canvas_px = px;
+            // ponytail: one scale for the whole session, the main window's;
+            // screens with different scales would need one per screen here.
+            self.screen_scale = screen_scale(ui.ctx());
         }
         if let Some(slot) = self.screen_px.get_mut(index) {
             *slot = px;
@@ -1595,21 +1623,27 @@ impl ActiveSession {
             return;
         };
         let target = desktop_size(self.canvas_px);
+        let scale = self.wanted_scale();
         let close_enough = usize::from(target.0).abs_diff(screen.width) <= 8
             && usize::from(target.1).abs_diff(screen.height) <= 8;
-        if close_enough || self.requested_size == Some(target) {
+        if scale == self.sent_scale && (close_enough || self.requested_size == Some(target)) {
             self.pending_size = None;
             return;
         }
         match self.pending_size {
             Some((size, since)) if size == target => {
                 if since.elapsed() >= RESIZE_SETTLE {
-                    logging::event(format_args!("Asked the PC for {}×{}", target.0, target.1));
+                    logging::event(format_args!(
+                        "Asked the PC for {}×{} at {scale}%",
+                        target.0, target.1
+                    ));
                     self.send(Command::Resize {
                         width: target.0,
                         height: target.1,
+                        scale,
                     });
                     self.requested_size = Some(target);
+                    self.sent_scale = scale;
                     self.pending_size = None;
                 }
             }
@@ -1623,22 +1657,31 @@ impl ActiveSession {
             return;
         }
         let target: Vec<(u16, u16)> = self.screen_px.iter().map(|&px| desktop_size(px)).collect();
+        let scale = self.wanted_scale();
         let close_enough = self.remote_monitors.len() == target.len()
             && self
                 .remote_monitors
                 .iter()
                 .zip(&target)
                 .all(|(m, &(w, h))| m.width.abs_diff(w) <= 8 && m.height.abs_diff(h) <= 8);
-        if close_enough || self.requested_layout.as_ref() == Some(&target) {
+        if scale == self.sent_scale
+            && (close_enough || self.requested_layout.as_ref() == Some(&target))
+        {
             self.pending_layout = None;
             return;
         }
         match &self.pending_layout {
             Some((sizes, since)) if *sizes == target => {
                 if since.elapsed() >= RESIZE_SETTLE {
-                    logging::event(format_args!("Asked the PC for screens {target:?}"));
-                    self.send(Command::Layout(target.clone()));
+                    logging::event(format_args!(
+                        "Asked the PC for screens {target:?} at {scale}%"
+                    ));
+                    self.send(Command::Layout {
+                        sizes: target.clone(),
+                        scale,
+                    });
                     self.requested_layout = Some(target);
+                    self.sent_scale = scale;
                     self.pending_layout = None;
                 }
             }
@@ -1804,6 +1847,15 @@ fn split_domain(username: &str) -> (Option<&str>, &str) {
 }
 
 /// A desktop size the server accepts: even width, each side within limits.
+/// This computer's screen scale as a percentage, whatever the app's zoom.
+pub fn screen_scale(ctx: &egui::Context) -> u32 {
+    scale_percent(ctx.native_pixels_per_point().unwrap_or(1.0))
+}
+
+fn scale_percent(pixels_per_point: f32) -> u32 {
+    (pixels_per_point * 100.0).round() as u32
+}
+
 fn desktop_size((width, height): (u16, u16)) -> (u16, u16) {
     (
         width.clamp(MIN_SIDE, MAX_SIDE) & !1,
@@ -2088,6 +2140,66 @@ mod tests {
         ] {
             assert!(!worth_retrying(&refused, true), "{refused}");
         }
+    }
+
+    #[test]
+    fn the_system_scale_reads_as_a_percentage() {
+        assert_eq!(scale_percent(1.0), 100);
+        assert_eq!(scale_percent(1.1), 110);
+        assert_eq!(scale_percent(1.25), 125);
+        assert_eq!(scale_percent(2.0), 200);
+    }
+
+    #[test]
+    fn a_scale_set_for_the_pc_wins_over_this_screens() {
+        let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
+        pc.scale_percent = Some(200);
+        let mut view = ActiveSession::new(pc, false);
+        view.screen_scale = 125;
+        assert_eq!(view.wanted_scale(), 200);
+        view.bookmark.scale_percent = None;
+        assert_eq!(view.wanted_scale(), 125);
+    }
+
+    #[test]
+    fn a_new_scale_alone_is_asked_of_the_pc() {
+        let pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
+        let mut view = ActiveSession::new(pc, false);
+        view.display_control = true;
+        view.screen = Some(Screen::new(1280, 720));
+        view.canvas_px = (1280, 720);
+        view.follow_canvas();
+        assert!(view.pending_size.is_none(), "nothing changed");
+
+        view.screen_scale = 125;
+        view.follow_canvas();
+        assert_eq!(view.sent_scale, 100, "not before it settles");
+        view.pending_size = Some(((1280, 720), Instant::now() - RESIZE_SETTLE));
+        view.follow_canvas();
+        assert_eq!(view.sent_scale, 125);
+        view.follow_canvas();
+        assert!(view.pending_size.is_none(), "asked only once");
+    }
+
+    #[test]
+    fn a_new_scale_alone_reaches_every_screen() {
+        let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
+        pc.screens = 2;
+        let mut view = ActiveSession::new(pc, false);
+        view.display_control = true;
+        view.screen = Some(Screen::new(1280, 720));
+        let sizes = vec![(640, 720), (640, 720)];
+        view.screen_px = sizes.clone();
+        view.requested_layout = Some(sizes.clone());
+        view.follow_layout();
+        assert!(view.pending_layout.is_none(), "nothing changed");
+
+        view.screen_scale = 150;
+        view.follow_layout();
+        assert_eq!(view.sent_scale, 100, "not before it settles");
+        view.pending_layout = Some((sizes, Instant::now() - RESIZE_SETTLE));
+        view.follow_layout();
+        assert_eq!(view.sent_scale, 150);
     }
 
     #[test]

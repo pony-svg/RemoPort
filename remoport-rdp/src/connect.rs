@@ -12,6 +12,7 @@ use ironrdp_connector::{
     BitmapConfig, ClientConnector, Config, ConnectionOutcome, ConnectionResult, ConnectorError,
     Credentials, DesktopSize, ServerName,
 };
+use ironrdp_displaycontrol::pdu::{DeviceScaleFactor, MonitorLayoutEntry};
 use ironrdp_dvc::DrdynvcClient;
 use ironrdp_egfx::client::GraphicsPipelineClient;
 use ironrdp_pdu::gcc::{self, KeyboardType};
@@ -352,6 +353,24 @@ fn connector_config(
     microphone: bool,
 ) -> Config {
     let (desktop, monitor_layout) = screens(config);
+    let (desktop_scale, device_scale) = scale_factors(config.scale);
+    // With several screens, each one's scale goes with the list of screens.
+    let monitor_extended_layout =
+        monitor_layout
+            .as_ref()
+            .map(|layout| gcc::ClientMonitorExtendedData {
+                extended_monitors_info: layout
+                    .monitors
+                    .iter()
+                    .map(|_| gcc::ExtendedMonitorInfo {
+                        physical_width: 0,
+                        physical_height: 0,
+                        orientation: gcc::MonitorOrientation::Landscape,
+                        desktop_scale_factor: desktop_scale,
+                        device_scale_factor: device_scale.value(),
+                    })
+                    .collect(),
+            });
     let credentials = Credentials::UsernamePassword {
         username: config.username.clone(),
         // IronRDP needs an owned String; that copy is IronRDP's to keep.
@@ -371,12 +390,12 @@ fn connector_config(
         ime_file_name: String::new(),
         dig_product_id: String::new(),
         desktop_size: desktop,
-        desktop_scale_factor: 100,
+        desktop_scale_factor: desktop_scale,
         monitor_layout,
-        monitor_extended_layout: None,
+        monitor_extended_layout,
         desktop_physical_size: None,
         desktop_orientation: None,
-        device_scale_factor: None,
+        device_scale_factor: Some(device_scale.value()),
         relative_mouse_input: false,
         connection_type: ironrdp_pdu::gcc::ConnectionType::Lan,
         // The original RDP security (RC4) is never offered.
@@ -423,6 +442,16 @@ fn with_resume(connector: ClientConnector, resume: Option<&ResumeCookie>) -> Cli
         logon_id: cookie.logon_id,
         random_bits: *cookie.random_bits,
     })
+}
+
+/// The two scale factors RDP sends for a scale: the one Windows displays at,
+/// within what RDP allows, and the nearest of the three device factors.
+pub(crate) fn scale_factors(percent: u32) -> (u32, DeviceScaleFactor) {
+    let desktop = MonitorLayoutEntry::adjust_desktop_scale_factor(percent);
+    (
+        desktop,
+        DeviceScaleFactor::from_desktop_scale_factor(desktop),
+    )
 }
 
 /// The desktop size and, for several screens, where each lies: side by
@@ -494,6 +523,7 @@ mod tests {
             width: 1280,
             height: 720,
             monitors: Vec::new(),
+            scale: 100,
             allow_without_nla: false,
             trust_store: crate::TrustStore::new(std::env::temp_dir().join("unused.json")),
             timeout: Duration::from_secs(1),
@@ -525,6 +555,38 @@ mod tests {
         let (one, none) = screens(&config());
         assert_eq!((one.width, one.height), (1280, 720));
         assert!(none.is_none());
+    }
+
+    #[test]
+    fn the_pc_is_told_the_scale_when_connecting() {
+        let mut scaled = config();
+        for (percent, desktop, device) in [
+            (100, 100, 100),
+            (125, 125, 100),
+            (150, 150, 140),
+            (200, 200, 180),
+            (50, 100, 100),
+            (900, 500, 180),
+        ] {
+            scaled.scale = percent;
+            let settings = connector_config(&scaled, 0x409, false, false);
+            assert_eq!(settings.desktop_scale_factor, desktop);
+            assert_eq!(settings.device_scale_factor, Some(device));
+            assert!(settings.monitor_extended_layout.is_none());
+        }
+
+        scaled.scale = 150;
+        scaled.monitors = vec![(1920, 1080), (1280, 1024)];
+        let settings = connector_config(&scaled, 0x409, false, false);
+        let each = settings
+            .monitor_extended_layout
+            .expect("each screen's scale")
+            .extended_monitors_info;
+        assert_eq!(each.len(), 2);
+        assert!(
+            each.iter()
+                .all(|m| m.desktop_scale_factor == 150 && m.device_scale_factor == 140)
+        );
     }
 
     #[test]

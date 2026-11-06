@@ -72,6 +72,8 @@ pub struct ConnectConfig {
     /// The scale the PC should display at, as a percentage: 125 for 125%.
     /// RDP allows 100 to 500; anything else goes to the nearest of those.
     pub scale: u32,
+    /// Bits per pixel: 32, or 16 to ask the PC for fewer colors.
+    pub color_depth: u32,
     /// Lets this PC sign in on its own screen when it does not offer NLA.
     pub allow_without_nla: bool,
     /// Where the certificates the user trusted are kept.

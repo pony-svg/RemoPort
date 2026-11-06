@@ -174,13 +174,19 @@ pub(crate) async fn connect(
         let _ = ready.send(Event::DisplayControlReady);
         Ok(Vec::new())
     });
-    let (decoder, decoder_note) = gfx::h264_decoder();
-    progress(decoder_note);
-    let graphics =
-        GraphicsPipelineClient::new(Box::new(gfx::Handler::new(events.clone())), decoder);
-    let mut drdynvc = DrdynvcClient::new()
-        .with_dynamic_channel(display_control)
-        .with_dynamic_channel(graphics);
+    let mut drdynvc = DrdynvcClient::new().with_dynamic_channel(display_control);
+    if connector.config.support_dyn_vc_gfx_protocol {
+        let (decoder, decoder_note) = gfx::h264_decoder();
+        progress(decoder_note);
+        let graphics =
+            GraphicsPipelineClient::new(Box::new(gfx::Handler::new(events.clone())), decoder);
+        drdynvc = drdynvc.with_dynamic_channel(graphics);
+    } else {
+        progress(format!(
+            "{}-bit color: the PC draws without the graphics pipeline",
+            config.color_depth
+        ));
+    }
     // Microphone packets are sent between the PC's turns, so the channel
     // queues them for the session.
     let microphone = input.map(|input| {
@@ -189,8 +195,6 @@ pub(crate) async fn connect(
         drdynvc = with_microphone;
         (packets, delivery)
     });
-    // Advertising the pipeline early is what makes Windows open it at all.
-    connector.config.support_dyn_vc_gfx_protocol = true;
     connector.static_channels.insert(drdynvc);
 
     // 3. Negotiate, then switch to TLS.
@@ -402,7 +406,7 @@ fn connector_config(
         enable_standard_rdp_security: false,
         bitmap: Some(BitmapConfig {
             lossy_compression: true,
-            color_depth: 32,
+            color_depth: config.color_depth,
             codecs: client_codecs_capabilities(&[]).unwrap_or_else(|_| BitmapCodecs(vec![])),
         }),
         client_build: 0,
@@ -425,7 +429,9 @@ fn connector_config(
         enable_server_pointer: true,
         pointer_software_rendering: false,
         multitransport_flags: None,
-        support_dyn_vc_gfx_protocol: false,
+        // Advertising the pipeline early is what makes Windows open it at all.
+        // Its pixels are always 32-bit, so with fewer it is not offered.
+        support_dyn_vc_gfx_protocol: config.color_depth == 32,
     }
 }
 
@@ -524,6 +530,7 @@ mod tests {
             height: 720,
             monitors: Vec::new(),
             scale: 100,
+            color_depth: 32,
             allow_without_nla: false,
             trust_store: crate::TrustStore::new(std::env::temp_dir().join("unused.json")),
             timeout: Duration::from_secs(1),
@@ -555,6 +562,20 @@ mod tests {
         let (one, none) = screens(&config());
         assert_eq!((one.width, one.height), (1280, 720));
         assert!(none.is_none());
+    }
+
+    #[test]
+    fn the_graphics_pipeline_is_offered_only_at_32_bit() {
+        let depth = |settings: &Config| settings.bitmap.as_ref().map(|b| b.color_depth);
+        let mut low = config();
+        let settings = connector_config(&low, 0x409, false, false);
+        assert_eq!(depth(&settings), Some(32));
+        assert!(settings.support_dyn_vc_gfx_protocol);
+
+        low.color_depth = 16;
+        let settings = connector_config(&low, 0x409, false, false);
+        assert_eq!(depth(&settings), Some(16));
+        assert!(!settings.support_dyn_vc_gfx_protocol);
     }
 
     #[test]

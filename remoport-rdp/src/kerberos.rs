@@ -295,6 +295,7 @@ mod tests {
             height: 720,
             monitors: Vec::new(),
             scale: 100,
+            color_depth: 32,
             allow_without_nla: false,
             trust_store: crate::TrustStore::new(std::env::temp_dir().join("unused.json")),
             timeout: std::time::Duration::from_secs(1),

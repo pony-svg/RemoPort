@@ -49,12 +49,51 @@ impl ResolutionOption {
             Self::Custom(w, h) => tf("{} x {} (Custom)", &[w, h]),
         }
     }
+
+    /// The desktop's size when it stays the same whatever the window.
+    pub fn fixed_size(&self) -> Option<(u16, u16)> {
+        match *self {
+            Self::Native => None,
+            Self::Fhd1080p => Some((1920, 1080)),
+            Self::Qhd1440p => Some((2560, 1440)),
+            Self::Uhd4k => Some((3840, 2160)),
+            Self::Custom(width, height) => Some((
+                u16::try_from(width).unwrap_or(u16::MAX),
+                u16::try_from(height).unwrap_or(u16::MAX),
+            )),
+        }
+    }
+
+    /// Whether the desktop counts this screen's points instead of its pixels:
+    /// with full resolution off, a smaller desktop that this computer enlarges.
+    pub fn uses_points(&self, hidpi_full_resolution: bool) -> bool {
+        !hidpi_full_resolution && self.fixed_size().is_none()
+    }
+
+    /// The display scale for a PC with none set: this screen's, unless this
+    /// computer is already doing the enlarging.
+    pub fn automatic_scale(&self, hidpi_full_resolution: bool, screen_scale: u32) -> u32 {
+        if self.uses_points(hidpi_full_resolution) {
+            100
+        } else {
+            screen_scale
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ColorQuality {
     High32Bit,
     Medium16Bit,
+}
+
+impl ColorQuality {
+    pub fn bits(self) -> u32 {
+        match self {
+            Self::High32Bit => 32,
+            Self::Medium16Bit => 16,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -332,6 +371,20 @@ mod tests {
         fields.insert("redirect_clipboard".into(), true.into());
         let loaded: DeviceBookmark = serde_json::from_value(old).expect("deserialize");
         assert!(!loaded.share_clipboard);
+    }
+
+    #[test]
+    fn full_resolution_off_only_matters_without_a_fixed_size() {
+        let native = ResolutionOption::Native;
+        let fixed = ResolutionOption::Fhd1080p;
+        assert_eq!(fixed.fixed_size(), Some((1920, 1080)));
+        assert_eq!(native.fixed_size(), None);
+        assert!(native.uses_points(false));
+        assert!(!native.uses_points(true));
+        assert!(!fixed.uses_points(false));
+        assert_eq!(native.automatic_scale(true, 125), 125);
+        assert_eq!(native.automatic_scale(false, 125), 100);
+        assert_eq!(fixed.automatic_scale(false, 125), 125);
     }
 
     #[test]

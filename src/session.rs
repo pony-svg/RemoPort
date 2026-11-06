@@ -13,7 +13,7 @@ use crate::model::{self, AudioPlaybackMode, DeviceBookmark};
 use crate::theme::Theme;
 use egui::{
     pos2, vec2, Align2, Color32, ColorImage, Context, Event, FontId, Modifiers, PointerButton,
-    Rect, RichText, Rounding, Sense, TextureHandle, TextureOptions, Ui,
+    Rect, RichText, Rounding, Sense, TextureHandle, TextureOptions, Ui, Vec2,
 };
 use remoport_rdp::{
     CertificateInfo, ClipboardText, Command, ConnectConfig, Error, Event as EngineEvent,
@@ -186,7 +186,8 @@ pub struct ActiveSession {
     session: Option<Session>,
     screen: Option<Screen>,
     graphics: Option<String>,
-    /// The drawing area's size in physical pixels, for the next connection.
+    /// What the main window measures in the desktop's pixels, for the next
+    /// connection and for following it.
     canvas_px: (u16, u16),
     /// This computer's screen scale as a percentage, as last seen.
     screen_scale: u32,
@@ -720,15 +721,34 @@ impl ActiveSession {
         let (host, port) = split_host_port(&target);
         let username = self.username.trim().to_string();
         let (domain, user) = split_domain(&username);
-        let (width, height) = desktop_size(self.canvas_px);
+        let (width, height) = self.wanted_size(self.canvas_px);
         let scale = self.wanted_scale();
         self.sent_scale = scale;
+        let color_depth = self.bookmark.color_quality.bits();
         logging::event(format_args!(
-            "Display scale for the PC: {scale}% ({})",
+            "Display for the PC: scale {scale}% ({}), {color_depth}-bit color, {}{}",
             if self.bookmark.scale_percent.is_some() {
                 "set for this PC"
             } else {
-                "same as this screen"
+                "automatic"
+            },
+            match (
+                self.bookmark.resolution.fixed_size(),
+                self.bookmark.fit_to_window,
+            ) {
+                (Some(_), true) => "fixed size, fitted to the window",
+                (Some(_), false) => "fixed size, with scroll bars",
+                (None, true) => "size follows the window",
+                (None, false) => "size of this display, with scroll bars",
+            },
+            if self
+                .bookmark
+                .resolution
+                .uses_points(self.bookmark.hidpi_full_resolution)
+            {
+                ", counting points (full resolution off)"
+            } else {
+                ""
             },
         ));
         let password = self.session_password.clone().unwrap_or_default();
@@ -736,7 +756,10 @@ impl ActiveSession {
             *first = self.canvas_px;
         }
         let monitors: Vec<(u16, u16)> = if self.screens > 1 {
-            self.screen_px.iter().map(|&px| desktop_size(px)).collect()
+            self.screen_px
+                .iter()
+                .map(|&px| self.wanted_size(px))
+                .collect()
         } else {
             Vec::new()
         };
@@ -820,6 +843,7 @@ impl ActiveSession {
             height,
             monitors,
             scale,
+            color_depth,
             allow_without_nla: self.bookmark.allow_without_nla,
             trust_store,
             timeout,
@@ -934,7 +958,14 @@ impl ActiveSession {
             EngineEvent::Resized { width, height } => {
                 logging::event(format_args!("Remote desktop is now {width}×{height}"));
                 self.screen = Some(Screen::new(width, height));
-                self.requested_size = None;
+                // A PC that answers with another size keeps the request standing,
+                // or it would be asked again and again.
+                if self
+                    .requested_size
+                    .is_some_and(|(w, h)| w.abs_diff(width) <= 8 && h.abs_diff(height) <= 8)
+                {
+                    self.requested_size = None;
+                }
             }
             EngineEvent::Frame { rect, bgra } => {
                 if let Some(screen) = &mut self.screen {
@@ -1250,16 +1281,52 @@ impl ActiveSession {
     // ── Remote screen ───────────────────────────────────────────────────
 
     fn measure_canvas(&mut self, ui: &Ui) {
-        let px = ui.available_size() * ui.ctx().pixels_per_point();
-        self.canvas_px = (to_u16(px.x), to_u16(px.y));
+        self.canvas_px = self.measured_px(ui);
         self.screen_scale = screen_scale(ui.ctx());
     }
 
-    /// The scale for the PC: the one set for it, or else this screen's.
+    /// What this window measures in the desktop's pixels: its drawing area, or
+    /// its whole screen when the session does not fit to the window.
+    fn measured_px(&self, ui: &Ui) -> (u16, u16) {
+        let ctx = ui.ctx();
+        let screen = if self.bookmark.fit_to_window {
+            None
+        } else {
+            ctx.input(|i| i.viewport().monitor_size)
+        };
+        let px = screen.unwrap_or_else(|| ui.available_size()) * self.desktop_pixels_per_point(ctx);
+        (to_u16(px.x), to_u16(px.y))
+    }
+
+    /// How many of the desktop's pixels make one of this window's points.
+    fn desktop_pixels_per_point(&self, ctx: &Context) -> f32 {
+        if self
+            .bookmark
+            .resolution
+            .uses_points(self.bookmark.hidpi_full_resolution)
+        {
+            1.0
+        } else {
+            ctx.pixels_per_point()
+        }
+    }
+
+    /// The desktop size to ask for: the one set for the PC, or else what a
+    /// window measures.
+    fn wanted_size(&self, measured: (u16, u16)) -> (u16, u16) {
+        desktop_size(self.bookmark.resolution.fixed_size().unwrap_or(measured))
+    }
+
+    /// The scale for the PC: the one set for it, or else the automatic one.
     fn wanted_scale(&self) -> u32 {
-        self.bookmark
-            .scale_percent
-            .map_or(self.screen_scale, u32::from)
+        self.bookmark.scale_percent.map_or_else(
+            || {
+                self.bookmark
+                    .resolution
+                    .automatic_scale(self.bookmark.hidpi_full_resolution, self.screen_scale)
+            },
+            u32::from,
+        )
     }
 
     /// The remote desktop: the main window shows the first screen, and each
@@ -1324,8 +1391,7 @@ impl ActiveSession {
     /// modifiers held and whether the window has the system's focus, when
     /// this window has the keyboard.
     fn remote_screen(&mut self, ui: &mut Ui, index: usize) -> Option<(Modifiers, bool)> {
-        let px = ui.available_size() * ui.ctx().pixels_per_point();
-        let px = (to_u16(px.x), to_u16(px.y));
+        let px = self.measured_px(ui);
         if index == 0 {
             self.canvas_px = px;
             // ponytail: one scale for the whole session, the main window's;
@@ -1337,11 +1403,21 @@ impl ActiveSession {
         }
 
         let ctx = ui.ctx().clone();
-        let ppp = ctx.pixels_per_point();
+        let per_point = self.desktop_pixels_per_point(&ctx);
+        let region = self.region(index);
+        // The picture at its own size in this window.
+        let size = region.map(|r| vec2(f32::from(r.width), f32::from(r.height)) / per_point);
+        let (rect, scrolled) = match size.filter(|_| !self.bookmark.fit_to_window) {
+            Some(size) => scroll_bars(ui, index, size),
+            None => (
+                ui.allocate_exact_size(ui.available_size(), Sense::hover())
+                    .0,
+                Vec2::ZERO,
+            ),
+        };
         // An id of its own: an automatic one depends on what came before in the
         // window, which changes as the bar hides in full screen, and with it
         // the screen would lose the keyboard on every switch.
-        let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
         let response = ui.interact(
             rect,
             egui::Id::new(("session-screen", index)),
@@ -1349,15 +1425,19 @@ impl ActiveSession {
         );
         ui.painter()
             .rect_filled(rect, Rounding::ZERO, Color32::BLACK);
-        let region = self.region(index)?;
+        let (region, size) = (region?, size?);
         let screen = self.screen.as_mut()?;
         let (desktop_width, desktop_height) = (screen.width as f32, screen.height as f32);
         let (width, height) = (f32::from(region.width), f32::from(region.height));
-        let size = vec2(width, height) / ppp;
-        // Never enlarge: until the server follows a resize, the picture is
-        // shown at its own size or smaller, centered.
-        let scale = (rect.width() / size.x).min(rect.height() / size.y).min(1.0);
-        let image = Rect::from_center_size(rect.center(), size * scale);
+        let placement = if !self.bookmark.fit_to_window {
+            Placement::Scrolled(scrolled)
+        } else if self.bookmark.resolution.fixed_size().is_some() {
+            Placement::Fitted
+        } else {
+            Placement::Following
+        };
+        let image = picture_rect(rect, size, placement);
+        let scale = image.width() / size.x;
         let texture = screen.texture(&ctx).id();
         let uv = Rect::from_min_max(
             pos2(
@@ -1369,7 +1449,8 @@ impl ActiveSession {
                 (f32::from(region.y) + height) / desktop_height,
             ),
         );
-        ui.painter().image(texture, image, uv, Color32::WHITE);
+        ui.painter_at(rect)
+            .image(texture, image, uv, Color32::WHITE);
 
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         if fullscreen
@@ -1437,7 +1518,7 @@ impl ActiveSession {
         // looks as the PC wants: an I-beam over text, a hand over a link.
         if response.hovered() || response.dragged() {
             let hover = ctx.input(|i| i.pointer.hover_pos());
-            let over_picture = hover.filter(|pos| image.contains(*pos));
+            let over_picture = hover.filter(|pos| rect.contains(*pos) && image.contains(*pos));
             match (&self.pointer, over_picture) {
                 (PointerLook::Hidden, Some(_)) => ctx.set_cursor_icon(egui::CursorIcon::None),
                 (
@@ -1451,7 +1532,7 @@ impl ActiveSession {
                     ctx.set_cursor_icon(egui::CursorIcon::None);
                     ui.painter().image(
                         texture.id(),
-                        pointer_rect(pos, *size, *hotspot, scale / ppp),
+                        pointer_rect(pos, *size, *hotspot, scale / per_point),
                         Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                         Color32::WHITE,
                     );
@@ -1462,15 +1543,10 @@ impl ActiveSession {
 
         let bar = self.bar_rect.filter(|_| index == 0);
         let to_remote = |pos: egui::Pos2| -> Option<(u16, u16)> {
-            if !image.contains(pos) || bar.is_some_and(|bar| bar.contains(pos)) {
+            if !rect.contains(pos) || bar.is_some_and(|bar| bar.contains(pos)) {
                 return None;
             }
-            let x = (pos.x - image.min.x) / image.width() * width;
-            let y = (pos.y - image.min.y) / image.height() * height;
-            Some((
-                region.x.saturating_add(to_u16(x.min(width - 1.0))),
-                region.y.saturating_add(to_u16(y.min(height - 1.0))),
-            ))
+            remote_point(pos, image, region)
         };
 
         let (events, modifiers) = ui.input(|i| (i.events.clone(), i.modifiers));
@@ -1622,7 +1698,7 @@ impl ActiveSession {
         let Some(screen) = &self.screen else {
             return;
         };
-        let target = desktop_size(self.canvas_px);
+        let target = self.wanted_size(self.canvas_px);
         let scale = self.wanted_scale();
         let close_enough = usize::from(target.0).abs_diff(screen.width) <= 8
             && usize::from(target.1).abs_diff(screen.height) <= 8;
@@ -1656,7 +1732,11 @@ impl ActiveSession {
         if !self.display_control || self.screen.is_none() {
             return;
         }
-        let target: Vec<(u16, u16)> = self.screen_px.iter().map(|&px| desktop_size(px)).collect();
+        let target: Vec<(u16, u16)> = self
+            .screen_px
+            .iter()
+            .map(|&px| self.wanted_size(px))
+            .collect();
         let scale = self.wanted_scale();
         let close_enough = self.remote_monitors.len() == target.len()
             && self
@@ -1861,6 +1941,83 @@ fn desktop_size((width, height): (u16, u16)) -> (u16, u16) {
         width.clamp(MIN_SIDE, MAX_SIDE) & !1,
         height.clamp(MIN_SIDE, MAX_SIDE),
     )
+}
+
+/// Scroll bars for a picture that may not fit the window. Returns the space
+/// left for the picture and how far it is scrolled. The wheel stays the PC's.
+fn scroll_bars(ui: &mut Ui, index: usize, size: Vec2) -> (Rect, Vec2) {
+    ui.ctx().input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
+    // Beside the picture rather than over it, where a click belongs to the PC.
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+    let room = ui.available_size();
+    // A picture that fits to within a pixel shows no bars.
+    let side = |picture: f32, room: f32| {
+        if (picture - room).abs() < 1.0 {
+            room
+        } else {
+            picture
+        }
+    };
+    let output = egui::ScrollArea::both()
+        .id_source(("session-scroll", index))
+        .auto_shrink(false)
+        .drag_to_scroll(false)
+        .show(ui, |ui| {
+            ui.allocate_space(vec2(side(size.x, room.x), side(size.y, room.y)));
+        });
+    (output.inner_rect, output.state.offset)
+}
+
+/// How the picture sits in the space it has.
+#[derive(Clone, Copy)]
+enum Placement {
+    /// The desktop follows the window: until the PC catches up, the picture is
+    /// shown at its own size or smaller.
+    Following,
+    /// The desktop's size is fixed: larger or smaller, it fills the window.
+    Fitted,
+    /// At its own size, moved this far along a side that does not fit.
+    Scrolled(Vec2),
+}
+
+/// Where the picture goes: centered along any side that fits, keeping its shape.
+fn picture_rect(area: Rect, size: Vec2, placement: Placement) -> Rect {
+    let fit = (area.width() / size.x).min(area.height() / size.y);
+    let (scale, scrolled) = match placement {
+        Placement::Following => (fit.min(1.0), Vec2::ZERO),
+        Placement::Fitted => (fit, Vec2::ZERO),
+        Placement::Scrolled(by) => (1.0, by),
+    };
+    let shown = size * scale;
+    let start = |low: f32, room: f32, side: f32, by: f32| {
+        if side > room {
+            low - by
+        } else {
+            low + (room - side) / 2.0
+        }
+    };
+    Rect::from_min_size(
+        pos2(
+            start(area.min.x, area.width(), shown.x, scrolled.x),
+            start(area.min.y, area.height(), shown.y, scrolled.y),
+        ),
+        shown,
+    )
+}
+
+/// The pixel of the remote desktop under `pos`, on a picture of `region`
+/// shown at `image`.
+fn remote_point(pos: egui::Pos2, image: Rect, region: RemoteRect) -> Option<(u16, u16)> {
+    if !image.contains(pos) {
+        return None;
+    }
+    let (width, height) = (f32::from(region.width), f32::from(region.height));
+    let x = (pos.x - image.min.x) / image.width() * width;
+    let y = (pos.y - image.min.y) / image.height() * height;
+    Some((
+        region.x.saturating_add(to_u16(x.min(width - 1.0))),
+        region.y.saturating_add(to_u16(y.min(height - 1.0))),
+    ))
 }
 
 /// Where the PC's pointer picture goes for a pointer at `pos`: its hotspot on
@@ -2159,6 +2316,112 @@ mod tests {
         assert_eq!(view.wanted_scale(), 200);
         view.bookmark.scale_percent = None;
         assert_eq!(view.wanted_scale(), 125);
+    }
+
+    #[test]
+    fn automatic_scale_stays_at_100_when_this_computer_enlarges_the_picture() {
+        let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
+        pc.hidpi_full_resolution = false;
+        let mut view = ActiveSession::new(pc, false);
+        view.screen_scale = 125;
+        assert_eq!(view.wanted_scale(), 100);
+        view.bookmark.scale_percent = Some(150);
+        assert_eq!(view.wanted_scale(), 150);
+    }
+
+    #[test]
+    fn the_picture_sits_as_the_options_say() {
+        let area = Rect::from_min_size(pos2(10.0, 20.0), vec2(800.0, 600.0));
+
+        // Following the window: smaller if it must, never larger.
+        let small = picture_rect(area, vec2(400.0, 300.0), Placement::Following);
+        assert_eq!(small.size(), vec2(400.0, 300.0));
+        assert_eq!(small.center(), area.center());
+        assert_eq!(
+            picture_rect(area, vec2(1600.0, 1200.0), Placement::Following),
+            area
+        );
+
+        // A fixed size fills the window either way, keeping its shape.
+        assert_eq!(
+            picture_rect(area, vec2(400.0, 300.0), Placement::Fitted),
+            area
+        );
+        let wide = picture_rect(area, vec2(1600.0, 900.0), Placement::Fitted);
+        assert_eq!(wide.size(), vec2(800.0, 450.0));
+        assert_eq!(wide.center(), area.center());
+
+        // Without fitting: its own size, scrolled only along the side that
+        // does not fit.
+        let scrolled = picture_rect(
+            area,
+            vec2(1600.0, 300.0),
+            Placement::Scrolled(vec2(100.0, 50.0)),
+        );
+        assert_eq!(scrolled.size(), vec2(1600.0, 300.0));
+        assert_eq!(scrolled.min, pos2(10.0 - 100.0, area.center().y - 150.0));
+    }
+
+    #[test]
+    fn a_scrolled_picture_still_points_at_the_right_pixel() {
+        let region = RemoteRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1200,
+        };
+        let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 480.0));
+        let image = picture_rect(
+            area,
+            vec2(1536.0, 960.0),
+            Placement::Scrolled(vec2(200.0, 100.0)),
+        );
+        // The window's corner is 200×100 points into the picture, at 1.25
+        // pixels per point.
+        assert_eq!(
+            remote_point(pos2(0.0, 0.0), image, region),
+            Some((250, 125))
+        );
+        assert_eq!(remote_point(pos2(1400.0, 0.0), image, region), None);
+    }
+
+    #[test]
+    fn a_fixed_resolution_ignores_the_window() {
+        let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
+        pc.resolution = crate::model::ResolutionOption::Fhd1080p;
+        let mut view = ActiveSession::new(pc, false);
+        view.display_control = true;
+        view.screen = Some(Screen::new(1920, 1080));
+        view.canvas_px = (800, 600);
+        view.follow_canvas();
+        assert!(view.pending_size.is_none(), "the window does not matter");
+
+        // A desktop of another size is asked to take the one set.
+        view.screen = Some(Screen::new(1280, 720));
+        view.follow_canvas();
+        assert_eq!(view.pending_size.map(|(size, _)| size), Some((1920, 1080)));
+    }
+
+    #[test]
+    fn a_pc_that_answers_another_size_is_not_asked_again() {
+        let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
+        pc.resolution = crate::model::ResolutionOption::Fhd1080p;
+        let mut view = ActiveSession::new(pc, false);
+        view.display_control = true;
+        view.requested_size = Some((1920, 1080));
+
+        view.handle(EngineEvent::Resized {
+            width: 1280,
+            height: 720,
+        });
+        view.follow_canvas();
+        assert!(view.pending_size.is_none(), "already asked");
+
+        view.handle(EngineEvent::Resized {
+            width: 1920,
+            height: 1080,
+        });
+        assert_eq!(view.requested_size, None);
     }
 
     #[test]

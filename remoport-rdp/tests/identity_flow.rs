@@ -77,6 +77,7 @@ fn config(port: u16, store: &TrustStore) -> ConnectConfig {
         height: 768,
         monitors: Vec::new(),
         scale: 100,
+        color_depth: 32,
         allow_without_nla: false,
         trust_store: store.clone(),
         timeout: Duration::from_secs(5),

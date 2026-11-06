@@ -7,7 +7,7 @@ use crate::theme::Theme;
 use egui::{vec2, Align2, Color32, Context, Ui, Window};
 use uuid::Uuid;
 
-/// The display scales offered for a PC, besides following this screen.
+/// The display scales offered for a PC, besides the automatic one.
 const SCALES: [u16; 7] = [100, 125, 150, 175, 200, 250, 300];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -409,17 +409,20 @@ impl AddEditPcDialog {
 
         ui.add_space(8.0);
 
-        let this_screen = tf(
-            "Same as this screen ({}%)",
-            &[&crate::session::screen_scale(ui.ctx())],
+        let automatic = tf(
+            "Automatic ({}%)",
+            &[&self.resolution.automatic_scale(
+                self.hidpi_full_resolution,
+                crate::session::screen_scale(ui.ctx()),
+            )],
         );
         egui::ComboBox::from_label(t("Scale"))
             .selected_text(match self.scale_percent {
-                None => this_screen.clone(),
+                None => automatic.clone(),
                 Some(percent) => format!("{percent}%"),
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.scale_percent, None, this_screen);
+                ui.selectable_value(&mut self.scale_percent, None, automatic);
                 for percent in SCALES {
                     ui.selectable_value(
                         &mut self.scale_percent,
@@ -455,9 +458,22 @@ impl AddEditPcDialog {
                     t("Medium (16 bit)"),
                 );
             });
+        if self.color_quality == ColorQuality::Medium16Bit {
+            ui.label(
+                egui::RichText::new(t(
+                    "At 16 bit the PC draws without H.264: colors lose depth and video may use \
+                     more of the network.",
+                ))
+                .size(11.5)
+                .weak(),
+            );
+        }
 
         ui.add_space(8.0);
-        ui.checkbox(&mut self.fit_to_window, t("Fit session to window"));
+        ui.checkbox(&mut self.fit_to_window, t("Fit session to window"))
+            .on_hover_text(t(
+                "When off, the desktop keeps its full size and the window gets scroll bars.",
+            ));
         ui.horizontal(|ui| {
             ui.label(t("Screens:"));
             for count in 1..=4u8 {
@@ -474,9 +490,13 @@ impl AddEditPcDialog {
                 .weak(),
             );
         }
-        ui.checkbox(
-            &mut self.hidpi_full_resolution,
-            t("Use full resolution on HiDPI displays"),
+        // With a fixed resolution there is nothing for it to decide.
+        ui.add_enabled(
+            self.resolution.fixed_size().is_none(),
+            egui::Checkbox::new(
+                &mut self.hidpi_full_resolution,
+                t("Use full resolution on HiDPI displays"),
+            ),
         );
     }
 

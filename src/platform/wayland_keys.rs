@@ -148,7 +148,7 @@ fn run(
     stop: &AtomicBool,
     shared: Shared,
 ) -> Result<(), String> {
-    // SAFETY: both addresses come from eframe's handles for the main window,
+    // SAFETY: both pointers come from the main window's raw display and window handles,
     // whose display and surface outlive this thread: `KeyGrab` joins it when
     // dropped, and the session is dropped in `on_exit`, before the window. The
     // backend does not take ownership of a foreign display or proxy.

@@ -70,7 +70,7 @@ pub(super) fn render(
 
     if !session.controller.is_connected() {
         session.input.key_grab = None;
-        session.input.wayland_keys_rx = None;
+        session.input.physical_keys_rx = None;
         session.input.key_grab_tried = false;
     } else if !session.input.key_grab_tried {
         session.input.key_grab_tried = true;
@@ -79,7 +79,7 @@ pub(super) fn render(
         let wakeup = Box::new(move || ctx.request_repaint());
         session.input.key_grab = session.ports.keys.start(tx, wakeup);
         if session.input.key_grab.is_some() {
-            session.input.wayland_keys_rx = Some(rx);
+            session.input.physical_keys_rx = Some(rx);
         }
     }
     if let Some(grab) = &session.input.key_grab {

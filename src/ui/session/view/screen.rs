@@ -54,13 +54,13 @@ pub(super) fn remote_screens(session: &mut ActiveSession, ui: &mut Ui) {
                 });
         });
     }
-    let has_wayland = session.input.key_grab.is_some();
-    if !has_wayland {
+    let has_physical_keys = session.input.key_grab.is_some();
+    if !has_physical_keys {
         session.sync_modifiers(focus.map_or(Modifiers::NONE, |(modifiers, _)| modifiers));
     }
     // The session lost the keyboard: release all held keys.
     if focus.is_none() {
-        if has_wayland {
+        if has_physical_keys {
             let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             let actions = session.input.state.handle_leave();
             session.execute_input_actions(actions, &ctx, fullscreen);
@@ -70,14 +70,14 @@ pub(super) fn remote_screens(session: &mut ActiveSession, ui: &mut Ui) {
             }
         }
     }
-    if has_wayland {
+    if has_physical_keys {
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         session.input.state.set_fullscreen(fullscreen);
         session
             .input
             .state
             .set_share_clipboard(session.bookmark.share_clipboard);
-        session.poll_wayland_keys(&ctx, focus.is_some(), fullscreen);
+        session.poll_physical_keys(&ctx, focus.is_some(), fullscreen);
         let tick_actions = session.input.state.tick(Instant::now());
         session.execute_input_actions(tick_actions, &ctx, fullscreen);
     }
@@ -306,7 +306,7 @@ fn collect_screen_input(
         remote_point(pos, place.image, place.region)
     };
 
-    let has_wayland = session.input.key_grab.is_some();
+    let has_physical_keys = session.input.key_grab.is_some();
     let (events, modifiers) = ui.input(|i| (i.events.clone(), i.modifiers));
     for event in events {
         match event {
@@ -361,7 +361,7 @@ fn collect_screen_input(
                 modifiers,
                 ..
             } if focused && modifiers.ctrl && modifiers.alt => {
-                if !has_wayland && pressed {
+                if !has_physical_keys && pressed {
                     if !fullscreen {
                         session.view.fullscreen_hint_until = Some(Instant::now() + FULLSCREEN_HINT);
                     }
@@ -380,7 +380,7 @@ fn collect_screen_input(
                 repeat,
                 modifiers,
             } if focused => {
-                if !has_wayland {
+                if !has_physical_keys {
                     // Modifiers first: a key and its Ctrl can land in one frame.
                     session.sync_modifiers(modifiers);
                     // Reserved combinations only: what is typed is never logged.
@@ -407,19 +407,19 @@ fn collect_screen_input(
             // egui turns these shortcuts into clipboard commands and
             // swallows the key press; the release still arrives as a key.
             Event::Copy if focused => {
-                if !has_wayland {
+                if !has_physical_keys {
                     session.input.fallback_keys_down.insert(keymap::C);
                     session.send_key(keymap::C, true);
                 }
             }
             Event::Cut if focused => {
-                if !has_wayland {
+                if !has_physical_keys {
                     session.input.fallback_keys_down.insert(keymap::X);
                     session.send_key(keymap::X, true);
                 }
             }
             Event::Paste(text) if focused => {
-                if has_wayland {
+                if has_physical_keys {
                     let actions = session.input.state.handle_egui_paste(text, Instant::now());
                     session.execute_input_actions(actions, &ctx, fullscreen);
                 } else {

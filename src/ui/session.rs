@@ -45,10 +45,10 @@ struct SessionInput {
     /// Asked for this stretch of full screen, whether it could be had or not.
     key_grab_tried: bool,
     /// Events from the physical keyboard listener.
-    wayland_keys_rx: Option<std::sync::mpsc::Receiver<PhysicalKeyEvent>>,
+    physical_keys_rx: Option<std::sync::mpsc::Receiver<PhysicalKeyEvent>>,
     /// State machine tracking physical and fallback keys.
     state: KeyState,
-    /// Keys pressed via egui fallback when Wayland is not available.
+    /// Keys pressed via egui fallback when physical key capture is unavailable.
     fallback_keys_down: HashSet<keymap::Scancode>,
 }
 
@@ -59,7 +59,7 @@ impl SessionInput {
             last_pointer: None,
             key_grab: None,
             key_grab_tried: false,
-            wayland_keys_rx: None,
+            physical_keys_rx: None,
             state: KeyState::new(false, share_clipboard),
             fallback_keys_down: HashSet::new(),
         }
@@ -69,7 +69,7 @@ impl SessionInput {
         self.modifiers = Modifiers::NONE;
         self.key_grab = None;
         self.key_grab_tried = false;
-        self.wayland_keys_rx = None;
+        self.physical_keys_rx = None;
         self.state.handle_leave();
         self.fallback_keys_down.clear();
     }
@@ -614,8 +614,8 @@ impl ActiveSession {
         }
     }
 
-    fn poll_wayland_keys(&mut self, ctx: &egui::Context, focused: bool, fullscreen: bool) {
-        let Some(rx) = &self.input.wayland_keys_rx else {
+    fn poll_physical_keys(&mut self, ctx: &egui::Context, focused: bool, fullscreen: bool) {
+        let Some(rx) = &self.input.physical_keys_rx else {
             return;
         };
         let now = Instant::now();

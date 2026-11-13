@@ -28,4 +28,21 @@ if [ -n "$VIOLATIONS_R1" ]; then
     exit 1
 fi
 
-echo "Boundary checks passed (R1: remoport-rdp is independent of UI and platform)."
+# Phase 2 session separation: signin and controller never mention egui; display only uses geometry types
+for file in src/session/signin.rs src/session/controller.rs; do
+    if BAD=$(grep -nE 'egui::|\buse egui\b' "$file"); then
+        echo "ERROR: $file must not reference egui:" >&2
+        echo "$BAD" >&2
+        exit 1
+    fi
+done
+
+BAD_DISPLAY_EGUI=$(grep -nE 'egui::|\buse egui\b' src/session/display.rs \
+    | sed -E 's/^[0-9]+://; s/egui::|\b(use|pos2|vec2|Pos2|Rect|Vec2)\b//g; s/[{},;[:space:]]//g' \
+    | grep -v '^$' || true)
+if [ -n "$BAD_DISPLAY_EGUI" ]; then
+    echo "ERROR: src/session/display.rs uses non-geometry egui items: $BAD_DISPLAY_EGUI" >&2
+    exit 1
+fi
+
+echo "Boundary checks passed (R1: remoport-rdp independent; session submodules clean)."

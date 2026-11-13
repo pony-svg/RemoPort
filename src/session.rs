@@ -4,7 +4,6 @@
 //! follow the window's size, share the clipboard and play sound when this PC
 //! has them, and bring a dropped connection back to the same session.
 
-use crate::credentials::{self, Outcome, Pending};
 use crate::i18n::{t, tf};
 use crate::key_grab::KeyGrab;
 use crate::keymap;
@@ -17,17 +16,19 @@ use egui::{
 };
 use remoport_rdp::{
     CertificateInfo, ClipboardText, Command, ConnectConfig, Error, Event as EngineEvent,
-    IdentityProblem, MouseButton, PointerShape, Rect as RemoteRect, RemotePointer, ResumeCookie,
-    Session, SharedFolder, SoundInput, SoundOutput, TrustReply, TrustStore,
+    IdentityProblem, MouseButton, PointerShape, Rect as RemoteRect, RemotePointer, Session,
+    SharedFolder, SoundInput, SoundOutput, TrustReply, TrustStore,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use zeroize::{Zeroize, Zeroizing};
 
 pub mod display;
 pub use display::*;
+
+pub mod signin;
+pub use signin::*;
 
 /// Limit for each step of the connection; the user's own decisions aside.
 const STEP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -167,18 +168,7 @@ pub struct ActiveSession {
     /// Whether the PC is saved, so its password may be remembered.
     saved: bool,
     phase: Phase,
-    username: String,
-    password: Zeroizing<String>,
-    /// "Remember my password" is ticked.
-    remember: bool,
-    /// The password remembered in the keyring for this PC.
-    saved_password: Option<Zeroizing<String>>,
-    /// Whether the last attempt used the remembered password.
-    used_saved_password: bool,
-    keyring: Option<Pending>,
-    /// A typed password to remember once the PC has accepted it.
-    to_remember: Option<Zeroizing<String>>,
-    sign_in_error: Option<String>,
+    pub signin: SignInState,
     session: Option<Session>,
     screen: Option<Screen>,
     graphics: Option<String>,
@@ -191,16 +181,6 @@ pub struct ActiveSession {
     last_pointer: Option<(u16, u16)>,
     /// Text the PC copied, until it is taken (or not) on the next frame.
     remote_copy: Option<ClipboardText>,
-    /// The password this session signed in with, kept while the session
-    /// lasts so a dropped connection can sign in again, as Windows App does.
-    /// Wiped when the session ends or this view closes.
-    session_password: Option<Zeroizing<String>>,
-    /// The PC's latest cookie for resuming this session.
-    resume: Option<ResumeCookie>,
-    /// The gateway's own password, as typed.
-    gateway_password: Zeroizing<String>,
-    /// That password, kept like `session_password` while the session lasts.
-    session_gateway_password: Option<Zeroizing<String>>,
     /// The PC has the microphone open.
     microphone_live: bool,
     /// The user muted the microphone; the PC then gets silence.
@@ -229,23 +209,16 @@ impl ActiveSession {
     /// A session for `bookmark`; `saved` tells whether it is one of the
     /// user's PCs (whose password may be remembered) or a one-off.
     pub fn new(bookmark: DeviceBookmark, saved: bool) -> Self {
-        let keyring = saved.then(|| credentials::lookup(bookmark.id));
         let screens = usize::from(bookmark.screens.clamp(1, 4));
         let share_clipboard = bookmark.share_clipboard;
+        let signin = SignInState::new(bookmark.username.clone(), saved, bookmark.id);
         Self {
-            username: bookmark.username.clone(),
             bookmark,
             open_app: None,
             notification_msg: None,
             saved,
             phase: Phase::SignIn,
-            password: Zeroizing::new(String::new()),
-            remember: false,
-            saved_password: None,
-            used_saved_password: false,
-            keyring,
-            to_remember: None,
-            sign_in_error: None,
+            signin,
             session: None,
             screen: None,
             graphics: None,
@@ -254,10 +227,6 @@ impl ActiveSession {
             modifiers: Modifiers::NONE,
             last_pointer: None,
             remote_copy: None,
-            session_password: None,
-            resume: None,
-            gateway_password: Zeroizing::new(String::new()),
-            session_gateway_password: None,
             microphone_live: false,
             microphone_muted: Arc::new(AtomicBool::new(false)),
             refocus: false,
@@ -352,7 +321,7 @@ impl ActiveSession {
         if matches!(
             self.phase,
             Phase::Connecting | Phase::Connected | Phase::Reconnecting { .. }
-        ) || self.keyring.is_some()
+        ) || self.signin.keyring.is_some()
         {
             ui.ctx().request_repaint_after(Duration::from_millis(16));
         }
@@ -526,40 +495,18 @@ impl ActiveSession {
     // ── Keyring ─────────────────────────────────────────────────────────
 
     fn poll_keyring(&mut self) {
-        let Some(outcome) = self.keyring.as_ref().and_then(Pending::poll) else {
-            return;
-        };
-        self.keyring = None;
-        match outcome {
-            Outcome::Found(password) => {
-                logging::event(format_args!(
-                    "A password for {} is saved in the keyring",
-                    self.bookmark.pc_name
-                ));
-                self.saved_password = Some(password);
-            }
-            Outcome::Missing => {}
-            Outcome::Saved => {
-                logging::event(format_args!(
-                    "Password for {} remembered in the keyring",
-                    self.bookmark.pc_name
-                ));
+        match self.signin.poll_keyring(&self.bookmark.pc_name) {
+            Some(KeyringEvent::Saved) => {
                 self.notification_msg =
                     Some(t("Your password is remembered in the system keyring.").to_string());
             }
-            Outcome::Forgotten => {
-                logging::event(format_args!(
-                    "Saved password for {} forgotten",
-                    self.bookmark.pc_name
-                ));
-            }
-            Outcome::Failed(error) => {
-                logging::event(format_args!("Keyring unavailable: {error}"));
+            Some(KeyringEvent::Failed(_)) => {
                 self.notification_msg = Some(
                     t("The system keyring is not available, so no password is remembered.")
                         .to_string(),
                 );
             }
+            _ => {}
         }
     }
 
@@ -589,13 +536,13 @@ impl ActiveSession {
                     .show(ui, |ui| {
                         ui.label(t("User name"));
                         ui.add(
-                            egui::TextEdit::singleline(&mut self.username)
+                            egui::TextEdit::singleline(&mut self.signin.username)
                                 .hint_text(t("user, DOMAIN\\user or user@domain"))
                                 .desired_width(280.0),
                         );
                         ui.end_row();
                         ui.label(t("Password"));
-                        if self.saved_password.is_some() {
+                        if self.signin.saved_password.is_some() {
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new(t("🔑 Saved in your keyring"))
@@ -605,7 +552,7 @@ impl ActiveSession {
                             });
                         } else {
                             let field = ui.add(
-                                egui::TextEdit::singleline(&mut *self.password)
+                                egui::TextEdit::singleline(&mut *self.signin.password)
                                     .password(true)
                                     .desired_width(280.0),
                             );
@@ -613,15 +560,18 @@ impl ActiveSession {
                                 field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         }
                         ui.end_row();
-                        if self.saved && self.saved_password.is_none() {
+                        if self.saved && self.signin.saved_password.is_none() {
                             ui.label("");
-                            ui.checkbox(&mut self.remember, t("Remember in the system keyring"));
+                            ui.checkbox(
+                                &mut self.signin.remember,
+                                t("Remember in the system keyring"),
+                            );
                             ui.end_row();
                         }
                         if self.gateway_account().is_some() {
                             ui.label(t("Gateway password"));
                             let field = ui.add(
-                                egui::TextEdit::singleline(&mut *self.gateway_password)
+                                egui::TextEdit::singleline(&mut *self.signin.gateway_password)
                                     .password(true)
                                     .hint_text(self.bookmark.gateway_username.trim().to_string())
                                     .desired_width(280.0),
@@ -633,11 +583,10 @@ impl ActiveSession {
                     });
             });
             if forget {
-                self.saved_password = None;
-                self.keyring = Some(credentials::forget(self.bookmark.id));
+                self.signin.forget_saved(self.bookmark.id);
             }
 
-            if let Some(error) = &self.sign_in_error {
+            if let Some(error) = &self.signin.sign_in_error {
                 ui.add_space(8.0);
                 ui.colored_label(DANGER, error);
             }
@@ -660,23 +609,8 @@ impl ActiveSession {
     }
 
     fn connect(&mut self) {
-        self.used_saved_password = self.password.is_empty() && self.saved_password.is_some();
-        let password = if self.used_saved_password {
-            self.saved_password.clone().unwrap_or_default()
-        } else {
-            self.password.clone()
-        };
-        self.to_remember = (self.saved && self.remember && !self.password.is_empty())
-            .then(|| self.password.clone());
-        // Kept, wiped on drop, for reconnecting; the form's copies go now.
-        self.session_password = Some(password);
-        self.password.zeroize();
-        self.session_gateway_password = self
-            .gateway_account()
-            .map(|_| self.gateway_password.clone());
-        self.gateway_password.zeroize();
-        self.resume = None;
-        self.sign_in_error = None;
+        let has_gateway = self.gateway_account().is_some();
+        self.signin.prepare_connect(self.saved, has_gateway);
         if self.start(STEP_TIMEOUT) {
             self.phase = Phase::Connecting;
         }
@@ -695,7 +629,7 @@ impl ActiveSession {
         };
         let target = self.bookmark.pc_name.trim().to_string();
         let (host, port) = split_host_port(&target);
-        let username = self.username.trim().to_string();
+        let username = self.signin.username.trim().to_string();
         let (domain, user) = split_domain(&username);
         let (width, height) = self.wanted_size(self.display.canvas_px);
         let scale = self.wanted_scale();
@@ -727,7 +661,7 @@ impl ActiveSession {
                 ""
             },
         ));
-        let password = self.session_password.clone().unwrap_or_default();
+        let password = self.signin.session_password.clone().unwrap_or_default();
         if let Some(first) = self.display.screen_px.first_mut() {
             *first = self.display.canvas_px;
         }
@@ -762,7 +696,7 @@ impl ActiveSession {
             .collect();
         logging::event(format_args!(
             "{} {host}:{port} as {}{} at {width}×{height}{}{}{}{}{}{}",
-            if self.resume.is_some() {
+            if self.signin.resume.is_some() {
                 "Resuming the session on"
             } else {
                 "Connecting to"
@@ -773,7 +707,7 @@ impl ActiveSession {
                 user
             },
             domain.map(|d| format!(", domain {d}")).unwrap_or_default(),
-            if self.used_saved_password {
+            if self.signin.used_saved_password {
                 ", saved password"
             } else {
                 ""
@@ -836,23 +770,24 @@ impl ActiveSession {
                     account: self.gateway_account().map(|user| {
                         (
                             user.to_string(),
-                            self.session_gateway_password.clone().unwrap_or_default(),
+                            self.signin
+                                .session_gateway_password
+                                .clone()
+                                .unwrap_or_default(),
                         )
                     }),
                 }),
             kerberos: self.bookmark.kerberos.then(|| remoport_rdp::Kerberos {
                 kdc: Some(self.bookmark.kdc.trim().to_string()).filter(|k| !k.is_empty()),
             }),
-            resume: self.resume.clone(),
+            resume: self.signin.resume.clone(),
         }));
         true
     }
 
     /// Wipes what the session kept for reconnecting.
     fn forget_session(&mut self) {
-        self.session_password = None;
-        self.session_gateway_password = None;
-        self.resume = None;
+        self.signin.forget_session();
     }
 
     /// The gateway's own account, when this PC goes through a gateway that
@@ -928,9 +863,7 @@ impl ActiveSession {
                     num: true,
                     scroll: false,
                 });
-                if let Some(password) = self.to_remember.take() {
-                    self.keyring = Some(credentials::save(self.bookmark.id, password));
-                }
+                self.signin.on_connected(self.bookmark.id);
             }
             EngineEvent::Resized { width, height } => {
                 logging::event(format_args!("Remote desktop is now {width}×{height}"));
@@ -984,15 +917,14 @@ impl ActiveSession {
                 self.display.remote_monitors = monitors;
             }
             EngineEvent::ResumeCookie(cookie) => {
-                logging::event("The PC gave a cookie to resume this session after a drop");
-                self.resume = Some(cookie);
+                self.signin.on_resume_cookie(cookie);
             }
             EngineEvent::Ended(outcome) => self.session_ended(outcome),
         }
     }
 
     fn session_ended(&mut self, outcome: Option<Error>) {
-        self.to_remember = None;
+        self.signin.on_session_ended();
         // Attempts made so far, when the session was up or coming back.
         let attempts = match self.phase {
             Phase::Connected => Some(0),
@@ -1001,7 +933,7 @@ impl ActiveSession {
         };
         self.reset_session();
         if let (Some(done), Some(error)) = (attempts, &outcome) {
-            if self.session_password.is_some() && worth_retrying(error, done > 0) {
+            if self.signin.session_password.is_some() && worth_retrying(error, done > 0) {
                 if done < MAX_RECONNECTS {
                     let attempt = done + 1;
                     let wait = reconnect_delay(attempt);
@@ -1042,15 +974,13 @@ impl ActiveSession {
                 logging::event(format_args!("Session ended: {error}"));
                 match error {
                     Error::Authentication(_) => {
-                        let message = if self.used_saved_password {
+                        let was_saved = self.signin.on_auth_failed();
+                        let message = if was_saved {
                             t("The PC refused the saved password. Type it again.")
                         } else {
                             t("The PC refused the sign-in. Check the user name and password.")
                         };
-                        if self.used_saved_password {
-                            self.saved_password = None;
-                        }
-                        self.sign_in_error = Some(message.to_string());
+                        self.signin.sign_in_error = Some(message.to_string());
                         self.phase = Phase::SignIn;
                     }
                     Error::NlaUnavailable => {
@@ -1883,7 +1813,7 @@ impl ActiveSession {
                 .clicked()
             {
                 logging::event("Try again");
-                self.sign_in_error = None;
+                self.signin.sign_in_error = None;
                 self.phase = Phase::SignIn;
             }
         });
@@ -2046,6 +1976,7 @@ fn to_i16(value: f32) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroize::Zeroizing;
 
     #[test]
     fn host_and_port_are_split() {
@@ -2283,7 +2214,7 @@ mod tests {
         let pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         let mut view = ActiveSession::new(pc, false);
         view.phase = Phase::Connected;
-        view.session_password = Some(Zeroizing::new("secret".into()));
+        view.signin.session_password = Some(Zeroizing::new("secret".into()));
 
         view.session_ended(Some(Error::ConnectionLost("reset".into())));
         assert!(matches!(
@@ -2298,14 +2229,14 @@ mod tests {
             assert!(
                 matches!(view.phase, Phase::Reconnecting { attempt, .. } if attempt == expected)
             );
-            assert!(view.session_password.is_some());
+            assert!(view.signin.session_password.is_some());
         }
         view.session_ended(Some(Error::Timeout("reaching the PC")));
         assert!(
             matches!(view.phase, Phase::Ended(ref why) if why.contains("could not be brought back"))
         );
         assert!(
-            view.session_password.is_none(),
+            view.signin.session_password.is_none(),
             "the password outlived the session"
         );
     }
@@ -2318,17 +2249,17 @@ mod tests {
             attempt: 3,
             at: None,
         };
-        view.session_password = Some(Zeroizing::new("old".into()));
+        view.signin.session_password = Some(Zeroizing::new("old".into()));
         view.session_ended(Some(Error::Authentication("changed".into())));
         assert!(matches!(view.phase, Phase::SignIn));
-        assert!(view.session_password.is_none());
+        assert!(view.signin.session_password.is_none());
 
         // A session the PC ended itself is not brought back.
         view.phase = Phase::Connected;
-        view.session_password = Some(Zeroizing::new("secret".into()));
+        view.signin.session_password = Some(Zeroizing::new("secret".into()));
         view.session_ended(None);
         assert!(matches!(view.phase, Phase::Ended(_)));
-        assert!(view.session_password.is_none());
+        assert!(view.signin.session_password.is_none());
     }
 
     #[test]

@@ -1,8 +1,8 @@
-use crate::i18n::{t, tf};
-use crate::logging;
-use crate::model::{
+use crate::domain::{
     AudioPlaybackMode, ColorQuality, DeviceBookmark, RedirectedFolder, ResolutionOption,
 };
+use crate::i18n::{resolution_label, t, tf};
+use crate::logging;
 use crate::theme::Theme;
 use egui::{vec2, Align2, Color32, Context, Ui, Window};
 use uuid::Uuid;
@@ -295,7 +295,7 @@ impl AddEditPcDialog {
         ui.add_space(8.0);
 
         egui::ComboBox::from_label(t("Resolution"))
-            .selected_text(self.draft.resolution.display_label())
+            .selected_text(resolution_label(&self.draft.resolution))
             .show_ui(ui, |ui| {
                 ui.selectable_value(
                     &mut self.draft.resolution,

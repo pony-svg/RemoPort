@@ -56,6 +56,18 @@ pub fn tf(template: &'static str, args: &[&dyn Display]) -> String {
     out
 }
 
+/// User-facing label for a [`crate::domain::ResolutionOption`].
+pub fn resolution_label(option: &crate::domain::ResolutionOption) -> String {
+    use crate::domain::ResolutionOption;
+    match option {
+        ResolutionOption::Native => t("Default for this display").to_string(),
+        ResolutionOption::Fhd1080p => "1920 x 1080 (1080p)".to_string(),
+        ResolutionOption::Qhd1440p => "2560 x 1440 (1440p)".to_string(),
+        ResolutionOption::Uhd4k => "3840 x 2160 (4K UHD)".to_string(),
+        ResolutionOption::Custom(w, h) => tf("{} x {} (Custom)", &[w, h]),
+    }
+}
+
 /// English and Spanish, by the English text.
 const TABLE: &[(&str, &str)] = &[
     (
@@ -565,7 +577,11 @@ mod tests {
             include_str!("app.rs"),
             include_str!("dialogs.rs"),
             include_str!("session.rs"),
-            include_str!("model.rs"),
+            include_str!("session/view/mod.rs"),
+            include_str!("session/view/bars.rs"),
+            include_str!("session/view/signin.rs"),
+            include_str!("session/view/identity.rs"),
+            include_str!("session/view/screen.rs"),
         ] {
             for start in ["t(\"", "tf(\n", "tf(\""] {
                 for (at, _) in source.match_indices(start) {

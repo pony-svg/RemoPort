@@ -1,12 +1,5 @@
+use crate::domain::Appearance;
 use egui::{Color32, Context, RichText, Stroke};
-
-/// Light or dark look, chosen in Settings.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Appearance {
-    Dark,
-    #[default]
-    Light,
-}
 
 pub struct Theme {
     pub appearance: Appearance,

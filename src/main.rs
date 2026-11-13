@@ -2,6 +2,7 @@ mod app;
 mod audio;
 mod credentials;
 mod dialogs;
+mod domain;
 mod fonts;
 mod i18n;
 mod icons;
@@ -9,8 +10,8 @@ pub mod input;
 mod key_grab;
 mod keymap;
 mod logging;
-mod model;
 mod session;
+mod store;
 mod theme;
 
 use app::RemoportApp;

@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use egui::{pos2, Pos2, Rect, Vec2};
 use remoport_rdp::{Command, Rect as RemoteRect};
 
+use crate::domain::ResolutionOption;
 use crate::logging;
-use crate::model::ResolutionOption;
 
 /// Time without a window size change before the PC is asked to match it.
 pub const RESIZE_SETTLE: Duration = Duration::from_millis(400);

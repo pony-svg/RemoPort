@@ -1,15 +1,16 @@
 use crate::credentials;
 use crate::dialogs::{AddEditPcDialog, AddWorkspaceDialog};
+use crate::domain::{
+    AppStateData, Appearance, DeviceBookmark, NavTab, RemoteAppItem, ResolutionOption, SortOption,
+    ViewMode,
+};
 use crate::fonts;
-use crate::i18n::{t, tf};
+use crate::i18n::{resolution_label, t, tf};
 use crate::icons::{self, Icon};
 use crate::logging;
-use crate::model::{
-    secure_config_dir, state_path, trust_store_path, AppStateData, DeviceBookmark, NavTab,
-    RemoteAppItem, ResolutionOption, SortOption, ViewMode,
-};
 use crate::session::ActiveSession;
-use crate::theme::{Appearance, Theme};
+use crate::store::{self, secure_config_dir, state_path, trust_store_path};
+use crate::theme::Theme;
 use chrono::Utc;
 use egui::popup::{popup_below_widget, PopupCloseBehavior};
 use egui::{
@@ -63,7 +64,7 @@ impl RemoportApp {
                 "Could not make the configuration folder private: {err}"
             ));
         }
-        let state = AppStateData::load();
+        let state = store::load();
         logging::event(format_args!(
             "Remoport {} started: {} PCs and {} apps, {:?} appearance, state in {}",
             env!("CARGO_PKG_VERSION"),
@@ -153,7 +154,7 @@ impl RemoportApp {
             return;
         };
         if json != self.last_saved {
-            if let Err(err) = AppStateData::save(&json) {
+            if let Err(err) = store::save(&json) {
                 logging::event(format_args!("Could not save the state: {err}"));
             }
             self.last_saved = json;
@@ -1148,7 +1149,7 @@ impl RemoportApp {
                 for pc in pcs {
                     ui.label(RichText::new(pc.display_title()).color(self.theme.text_primary));
                     ui.label(&pc.pc_name);
-                    ui.label(pc.resolution.display_label());
+                    ui.label(resolution_label(&pc.resolution));
                     ui.label(
                         pc.last_connected
                             .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
@@ -1472,7 +1473,7 @@ impl RemoportApp {
         egui::ComboBox::from_label(
             RichText::new(t("Resolution for PCs you add")).color(self.theme.text_secondary),
         )
-        .selected_text(self.state.default_resolution.display_label())
+        .selected_text(resolution_label(&self.state.default_resolution))
         .show_ui(ui, |ui| {
             for option in [
                 ResolutionOption::Native,
@@ -1483,14 +1484,14 @@ impl RemoportApp {
                 ui.selectable_value(
                     &mut self.state.default_resolution,
                     option,
-                    option.display_label(),
+                    resolution_label(&option),
                 );
             }
         });
         if self.state.default_resolution != resolution {
             logging::event(format_args!(
                 "Resolution for new PCs: {}",
-                self.state.default_resolution.display_label()
+                resolution_label(&self.state.default_resolution)
             ));
         }
 

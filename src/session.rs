@@ -4,11 +4,12 @@
 //! follow the window's size, share the clipboard and play sound when this PC
 //! has them, and bring a dropped connection back to the same session.
 
+use crate::domain::{AudioPlaybackMode, DeviceBookmark};
 use crate::i18n::{t, tf};
 use crate::key_grab::KeyGrab;
 use crate::keymap;
 use crate::logging;
-use crate::model::{self, AudioPlaybackMode, DeviceBookmark};
+use crate::store;
 use crate::theme::Theme;
 use egui::{Context, Modifiers, Ui};
 use remoport_rdp::{
@@ -171,7 +172,7 @@ impl ActiveSession {
     /// Starts the engine with the session's password, resuming the session
     /// when the PC gave a cookie for it. Returns whether it started.
     fn start(&mut self, timeout: Duration) -> bool {
-        let Some(trust_store) = model::trust_store_path().map(TrustStore::new) else {
+        let Some(trust_store) = store::trust_store_path().map(TrustStore::new) else {
             self.forget_session();
             self.controller.phase = Phase::Ended(
                 t("Remoport has no folder to keep trusted certificates in (HOME is not set).")
@@ -885,7 +886,7 @@ mod tests {
     #[test]
     fn a_fixed_resolution_ignores_the_window() {
         let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
-        pc.resolution = crate::model::ResolutionOption::Fhd1080p;
+        pc.resolution = crate::domain::ResolutionOption::Fhd1080p;
         let mut view = ActiveSession::new(pc, false);
         view.display.display_control = true;
         view.screen.resize(1920, 1080);
@@ -908,7 +909,7 @@ mod tests {
     #[test]
     fn a_pc_that_answers_another_size_is_not_asked_again() {
         let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
-        pc.resolution = crate::model::ResolutionOption::Fhd1080p;
+        pc.resolution = crate::domain::ResolutionOption::Fhd1080p;
         let mut view = ActiveSession::new(pc, false);
         view.display.display_control = true;
         view.display.requested_size = Some((1920, 1080));

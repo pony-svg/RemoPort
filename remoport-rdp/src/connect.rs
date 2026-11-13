@@ -70,7 +70,7 @@ pub(crate) async fn connect(
     };
 
     // 1. Reach the PC, directly or through its RD Gateway.
-    let (stream, client_addr): (Box<dyn Transport>, _) = match &config.gateway {
+    let (stream, client_addr): (Box<dyn Transport>, _) = match &config.destination.gateway {
         Some(gateway) => {
             progress(format!(
                 "Opening a tunnel through the RD Gateway {}{}",
@@ -81,33 +81,38 @@ pub(crate) async fn connect(
                     ""
                 }
             ));
-            let (tunnel, client_addr) =
-                timeout(config.timeout, crate::gateway::open(gateway, config))
-                    .await
-                    .map_err(|_| Error::Timeout("reaching the RD Gateway"))??;
+            let (tunnel, client_addr) = timeout(
+                config.destination.timeout,
+                crate::gateway::open(gateway, config),
+            )
+            .await
+            .map_err(|_| Error::Timeout("reaching the RD Gateway"))??;
             progress(format!(
                 "Reached {} through {} (its certificate verified)",
-                config.host, gateway.address
+                config.destination.host, gateway.address
             ));
             (Box::new(tunnel), client_addr)
         }
         None => {
-            let stream = timeout(config.timeout, net::connect_tcp(&config.host, config.port))
-                .await
-                .map_err(|_| Error::Timeout("reaching the PC"))?
-                .map_err(|e| {
-                    Error::Unreachable(format!(
-                        "{}:{} could not be reached: {e}",
-                        config.host, config.port
-                    ))
-                })?;
+            let stream = timeout(
+                config.destination.timeout,
+                net::connect_tcp(&config.destination.host, config.destination.port),
+            )
+            .await
+            .map_err(|_| Error::Timeout("reaching the PC"))?
+            .map_err(|e| {
+                Error::Unreachable(format!(
+                    "{}:{} could not be reached: {e}",
+                    config.destination.host, config.destination.port
+                ))
+            })?;
             net::tune(&stream);
             let client_addr = stream
                 .local_addr()
                 .map_err(|e| Error::Unreachable(e.to_string()))?;
             progress(format!(
                 "Reached {} at {}",
-                config.host,
+                config.destination.host,
                 stream
                     .peer_addr()
                     .map_or_else(|_| "?".to_string(), |a| a.to_string())
@@ -121,20 +126,20 @@ pub(crate) async fn connect(
     // when this PC has them.
     let (layout, layout_source) = keyboard_layout::detect_keyboard_layout();
     progress(format!("Keyboard layout: {layout_source}"));
-    let sound = config.sound.take();
-    let input = config.microphone.take();
+    let sound = config.sharing.sound.take();
+    let input = config.sharing.microphone.take();
     let playing = sound.is_some();
     let mut connector = with_resume(
         ClientConnector::new(
             connector_config(config, layout, playing, input.is_some()),
             client_addr,
         ),
-        config.resume.as_ref(),
+        config.credentials.resume.as_ref(),
     );
-    if let Some(cookie) = &config.resume {
+    if let Some(cookie) = &config.credentials.resume {
         progress(format!("Resuming session {} of this PC", cookie.logon_id));
     }
-    let clipboard = config.clipboard.then(|| {
+    let clipboard = config.sharing.clipboard.then(|| {
         let (channel, clipboard) = clipboard::channel();
         connector.static_channels.insert(channel);
         clipboard
@@ -149,10 +154,12 @@ pub(crate) async fn connect(
     // The device channel carries the shared folders, and Windows sends sound
     // only alongside it; without folders it announces no device.
     let mut drives = 0;
-    if playing || !config.folders.is_empty() {
-        let (backend, announced) = drive::DriveBackend::new(&config.folders, events.clone());
+    if playing || !config.sharing.folders.is_empty() {
+        let (backend, announced) =
+            drive::DriveBackend::new(&config.sharing.folders, events.clone());
         drives = announced.len();
-        let mut rdpdr = ironrdp_rdpdr::Rdpdr::new(Box::new(backend), config.client_name.clone());
+        let mut rdpdr =
+            ironrdp_rdpdr::Rdpdr::new(Box::new(backend), config.destination.client_name.clone());
         if !announced.is_empty() {
             rdpdr = rdpdr.with_drives(Some(announced));
         }
@@ -184,7 +191,7 @@ pub(crate) async fn connect(
     } else {
         progress(format!(
             "{}-bit color: the PC draws without the graphics pipeline",
-            config.color_depth
+            config.display.color_depth
         ));
     }
     // Microphone packets are sent between the PC's turns, so the channel
@@ -200,15 +207,15 @@ pub(crate) async fn connect(
     // 3. Negotiate, then switch to TLS.
     let mut framed = TokioFramed::new(stream);
     let should_upgrade = timeout(
-        config.timeout,
+        config.destination.timeout,
         ironrdp_tokio::connect_begin(&mut framed, &mut connector),
     )
     .await
     .map_err(|_| Error::Timeout("negotiating"))?
-    .map_err(|e| negotiation_error(&e, config.allow_without_nla))?;
+    .map_err(|e| negotiation_error(&e, config.security.allow_without_nla))?;
     let (tls, certificate) = timeout(
-        config.timeout,
-        ironrdp_tls::upgrade(framed.into_inner_no_leftover(), &config.host),
+        config.destination.timeout,
+        ironrdp_tls::upgrade(framed.into_inner_no_leftover(), &config.destination.host),
     )
     .await
     .map_err(|_| Error::Timeout("setting up the secure channel"))?
@@ -219,7 +226,7 @@ pub(crate) async fn connect(
     check_identity(config, &certificate, events).await?;
 
     // 5. Sign in with CredSSP and finish the handshake.
-    let kerberos = config.kerberos.as_ref().and_then(|settings| {
+    let kerberos = config.credentials.kerberos.as_ref().and_then(|settings| {
         for note in kerberos::preflight(config) {
             progress(note);
         }
@@ -251,13 +258,16 @@ pub(crate) async fn connect(
         connector,
         &mut framed,
         &mut network,
-        ServerName::new(&config.host),
+        ServerName::new(&config.destination.host),
         server_public_key,
         kerberos,
     ));
-    let outcome = timeout(config.timeout, futures::FutureExt::catch_unwind(finalize))
-        .await
-        .map_err(|_| Error::Timeout("signing in"))?;
+    let outcome = timeout(
+        config.destination.timeout,
+        futures::FutureExt::catch_unwind(finalize),
+    )
+    .await
+    .map_err(|_| Error::Timeout("signing in"))?;
     match outcome {
         Ok(Ok(ConnectionOutcome::Connected(result))) => Ok(Established {
             framed,
@@ -291,9 +301,12 @@ async fn check_identity(
     let der = certificate
         .to_der()
         .map_err(|e| Error::Protocol(format!("the PC's certificate could not be read: {e}")))?;
-    let chain = identity::chain_check(&der, &config.host);
+    let chain = identity::chain_check(&der, &config.destination.host);
     let sha256 = identity::fingerprint(&der);
-    let trusted = config.trust_store.trusted(&config.host, config.port);
+    let trusted = config
+        .security
+        .trust_store
+        .trusted(&config.destination.host, config.destination.port);
     match identity::verdict(&chain, trusted.as_deref(), &sha256) {
         Verdict::Verified { issuer } => {
             let _ = events.send(Event::Log(format!(
@@ -309,7 +322,13 @@ async fn check_identity(
         }
         Verdict::Ask(problem) => {
             let why = chain.err().unwrap_or_default();
-            let info = identity::describe(certificate, &der, &config.host, config.port, why);
+            let info = identity::describe(
+                certificate,
+                &der,
+                &config.destination.host,
+                config.destination.port,
+                why,
+            );
             let (reply, answer) = tokio::sync::oneshot::channel();
             events
                 .send(Event::VerifyIdentity {
@@ -320,7 +339,7 @@ async fn check_identity(
                 .map_err(|_| Error::IdentityRejected)?;
             match timeout(IDENTITY_DECISION, answer).await {
                 Ok(Ok(true)) => {
-                    if let Err(e) = config.trust_store.remember(&info) {
+                    if let Err(e) = config.security.trust_store.remember(&info) {
                         let _ = events.send(Event::Log(format!(
                             "The certificate could not be remembered, you will be asked again: {e}"
                         )));
@@ -357,7 +376,7 @@ fn connector_config(
     microphone: bool,
 ) -> Config {
     let (desktop, monitor_layout) = screens(config);
-    let (desktop_scale, device_scale) = scale_factors(config.scale);
+    let (desktop_scale, device_scale) = scale_factors(config.display.scale);
     // With several screens, each one's scale goes with the list of screens.
     let monitor_extended_layout =
         monitor_layout
@@ -376,16 +395,17 @@ fn connector_config(
                     .collect(),
             });
     let credentials = Credentials::UsernamePassword {
-        username: config.username.clone(),
+        username: config.credentials.username.clone(),
         // IronRDP needs an owned String; that copy is IronRDP's to keep.
-        password: config.password.as_str().to_owned(),
+        password: config.credentials.password.as_str().to_owned(),
     };
-    let autologon = !config.username.is_empty() && !config.password.is_empty();
+    let autologon =
+        !config.credentials.username.is_empty() && !config.credentials.password.is_empty();
     Config {
         credentials,
-        domain: config.domain.clone(),
+        domain: config.credentials.domain.clone(),
         // Plain TLS (sign-in on the remote screen) only when allowed per PC.
-        enable_tls: config.allow_without_nla,
+        enable_tls: config.security.allow_without_nla,
         enable_credssp: true,
         keyboard_type: KeyboardType::IBM_ENHANCED,
         keyboard_subtype: 0,
@@ -406,11 +426,11 @@ fn connector_config(
         enable_standard_rdp_security: false,
         bitmap: Some(BitmapConfig {
             lossy_compression: true,
-            color_depth: config.color_depth,
+            color_depth: config.display.color_depth,
             codecs: client_codecs_capabilities(&[]).unwrap_or_else(|_| BitmapCodecs(vec![])),
         }),
         client_build: 0,
-        client_name: config.client_name.clone(),
+        client_name: config.destination.client_name.clone(),
         client_dir: String::new(),
         alternate_shell: String::new(),
         work_dir: String::new(),
@@ -431,7 +451,7 @@ fn connector_config(
         multitransport_flags: None,
         // Advertising the pipeline early is what makes Windows open it at all.
         // Its pixels are always 32-bit, so with fewer it is not offered.
-        support_dyn_vc_gfx_protocol: config.color_depth == 32,
+        support_dyn_vc_gfx_protocol: config.display.color_depth == 32,
     }
 }
 
@@ -463,15 +483,16 @@ pub(crate) fn scale_factors(percent: u32) -> (u32, DeviceScaleFactor) {
 /// The desktop size and, for several screens, where each lies: side by
 /// side, left to right, the first one primary.
 fn screens(config: &ConnectConfig) -> (DesktopSize, Option<gcc::ClientMonitorData>) {
-    if config.monitors.len() < 2 {
+    if config.display.monitors.len() < 2 {
         let desktop = DesktopSize {
-            width: config.width,
-            height: config.height,
+            width: config.display.width,
+            height: config.display.height,
         };
         return (desktop, None);
     }
     let mut left = 0i32;
     let monitors = config
+        .display
         .monitors
         .iter()
         .enumerate()
@@ -493,11 +514,13 @@ fn screens(config: &ConnectConfig) -> (DesktopSize, Option<gcc::ClientMonitorDat
         .collect();
     let desktop = DesktopSize {
         width: config
+            .display
             .monitors
             .iter()
             .map(|&(width, _)| width)
             .fold(0u16, u16::saturating_add),
         height: config
+            .display
             .monitors
             .iter()
             .map(|&(_, height)| height)
@@ -531,7 +554,7 @@ mod tests {
     #[test]
     fn several_screens_sit_side_by_side_the_first_primary() {
         let mut two = config();
-        two.monitors = vec![(1920, 1080), (1280, 1024)];
+        two.display.monitors = vec![(1920, 1080), (1280, 1024)];
         let (desktop, layout) = screens(&two);
         assert_eq!((desktop.width, desktop.height), (3200, 1080));
         let monitors = layout.expect("a layout").monitors;
@@ -555,7 +578,7 @@ mod tests {
         assert_eq!(depth(&settings), Some(32));
         assert!(settings.support_dyn_vc_gfx_protocol);
 
-        low.color_depth = 16;
+        low.display.color_depth = 16;
         let settings = connector_config(&low, 0x409, false, false);
         assert_eq!(depth(&settings), Some(16));
         assert!(!settings.support_dyn_vc_gfx_protocol);
@@ -572,15 +595,15 @@ mod tests {
             (50, 100, 100),
             (900, 500, 180),
         ] {
-            scaled.scale = percent;
+            scaled.display.scale = percent;
             let settings = connector_config(&scaled, 0x409, false, false);
             assert_eq!(settings.desktop_scale_factor, desktop);
             assert_eq!(settings.device_scale_factor, Some(device));
             assert!(settings.monitor_extended_layout.is_none());
         }
 
-        scaled.scale = 150;
-        scaled.monitors = vec![(1920, 1080), (1280, 1024)];
+        scaled.display.scale = 150;
+        scaled.display.monitors = vec![(1920, 1080), (1280, 1024)];
         let settings = connector_config(&scaled, 0x409, false, false);
         let each = settings
             .monitor_extended_layout

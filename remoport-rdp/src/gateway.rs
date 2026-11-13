@@ -37,12 +37,12 @@ pub(crate) async fn open(
         // IronRDP needs an owned String; `Target` wipes it.
         gw_pass: password.to_owned(),
         smart_card: None,
-        server: config.host.clone(),
+        server: config.destination.host.clone(),
     });
     GwClient::connect_with_port_and_certificate_validation(
         &target.0,
-        &config.client_name,
-        config.port,
+        &config.destination.client_name,
+        config.destination.port,
         CertificateValidation::Strict,
         None,
     )
@@ -55,11 +55,13 @@ fn account<'a>(gateway: &'a Gateway, config: &'a ConnectConfig) -> (String, &'a 
     match &gateway.account {
         Some((user, password)) => (user.trim().to_string(), password.as_str()),
         None => (
-            match &config.domain {
-                Some(domain) if !domain.is_empty() => format!("{domain}\\{}", config.username),
-                _ => config.username.clone(),
+            match &config.credentials.domain {
+                Some(domain) if !domain.is_empty() => {
+                    format!("{domain}\\{}", config.credentials.username)
+                }
+                _ => config.credentials.username.clone(),
             },
-            config.password.as_str(),
+            config.credentials.password.as_str(),
         ),
     }
 }
@@ -126,7 +128,7 @@ mod tests {
             zeroize::Zeroizing::new("pc-secret".to_string()),
             crate::TrustStore::new(std::env::temp_dir().join("unused.json")),
         );
-        config.domain = Some("CORP".to_string());
+        config.credentials.domain = Some("CORP".to_string());
         let shared = Gateway {
             address: "gw".to_string(),
             account: None,

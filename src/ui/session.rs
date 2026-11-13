@@ -14,8 +14,9 @@ use remoport_core::ports::{PhysicalKeyEvent, PhysicalKeyboard, PlatformPorts};
 use remoport_core::session::input::{InputAction, KeyState};
 use remoport_core::store;
 use remoport_rdp::{
-    ClipboardText, Command, ConnectConfig, Error, Event as EngineEvent, IdentityProblem,
-    Rect as RemoteRect, SharedFolder, TrustStore,
+    ClipboardText, Command, ConnectConfig, Credentials, Destination, DisplaySettings, Error,
+    Event as EngineEvent, IdentityProblem, Rect as RemoteRect, SecuritySettings, SharedFolder,
+    SharingSettings, TrustStore,
 };
 use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
@@ -299,42 +300,52 @@ impl ActiveSession {
             ));
         }
         self.controller.start(ConnectConfig {
-            host: host.to_string(),
-            port,
-            username: user.to_string(),
-            domain: domain.map(str::to_string),
-            password,
-            width,
-            height,
-            monitors,
-            scale,
-            color_depth,
-            allow_without_nla: self.bookmark.allow_without_nla,
-            trust_store,
-            timeout,
-            client_name: client_name(),
-            clipboard: self.bookmark.share_clipboard,
-            sound,
-            microphone,
-            folders,
-            gateway: Some(self.bookmark.gateway.trim().to_string())
-                .filter(|g| !g.is_empty())
-                .map(|address| remoport_rdp::Gateway {
-                    address,
-                    account: self.gateway_account().map(|user| {
-                        (
-                            user.to_string(),
-                            self.signin
-                                .session_gateway_password
-                                .clone()
-                                .unwrap_or_default(),
-                        )
+            destination: Destination {
+                host: host.to_string(),
+                port,
+                client_name: client_name(),
+                timeout,
+                gateway: Some(self.bookmark.gateway.trim().to_string())
+                    .filter(|g| !g.is_empty())
+                    .map(|address| remoport_rdp::Gateway {
+                        address,
+                        account: self.gateway_account().map(|user| {
+                            (
+                                user.to_string(),
+                                self.signin
+                                    .session_gateway_password
+                                    .clone()
+                                    .unwrap_or_default(),
+                            )
+                        }),
                     }),
+            },
+            credentials: Credentials {
+                username: user.to_string(),
+                domain: domain.map(str::to_string),
+                password,
+                kerberos: self.bookmark.kerberos.then(|| remoport_rdp::Kerberos {
+                    kdc: Some(self.bookmark.kdc.trim().to_string()).filter(|k| !k.is_empty()),
                 }),
-            kerberos: self.bookmark.kerberos.then(|| remoport_rdp::Kerberos {
-                kdc: Some(self.bookmark.kdc.trim().to_string()).filter(|k| !k.is_empty()),
-            }),
-            resume: self.signin.resume.clone(),
+                resume: self.signin.resume.clone(),
+            },
+            display: DisplaySettings {
+                width,
+                height,
+                monitors,
+                scale,
+                color_depth,
+            },
+            sharing: SharingSettings {
+                clipboard: self.bookmark.share_clipboard,
+                sound,
+                microphone,
+                folders,
+            },
+            security: SecuritySettings {
+                trust_store,
+                allow_without_nla: self.bookmark.allow_without_nla,
+            },
         });
         true
     }

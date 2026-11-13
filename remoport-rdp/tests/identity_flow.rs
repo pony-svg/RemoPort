@@ -73,11 +73,11 @@ fn config(port: u16, store: &TrustStore) -> ConnectConfig {
         Zeroizing::new("not-a-real-password".to_string()),
         store.clone(),
     );
-    config.port = port;
-    config.width = 1024;
-    config.height = 768;
-    config.timeout = Duration::from_secs(5);
-    config.client_name = "remoport-test".to_string();
+    config.destination.port = port;
+    config.display.width = 1024;
+    config.display.height = 768;
+    config.destination.timeout = Duration::from_secs(5);
+    config.destination.client_name = "remoport-test".to_string();
     config
 }
 
@@ -249,8 +249,8 @@ async fn an_untrusted_gateway_never_gets_the_credentials() {
 
     let (dir, store) = scratch_store("gateway");
     let mut settings = config(3389, &store);
-    settings.host = "pc.internal.example".to_string();
-    settings.gateway = Some(remoport_rdp::Gateway {
+    settings.destination.host = "pc.internal.example".to_string();
+    settings.destination.gateway = Some(remoport_rdp::Gateway {
         address: format!("localhost:{port}"),
         account: None,
     });

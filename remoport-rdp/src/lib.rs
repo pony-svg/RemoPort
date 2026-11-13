@@ -56,14 +56,34 @@ use std::time::Duration;
 
 use zeroize::Zeroizing;
 
-/// What to connect to, and how.
-pub struct ConnectConfig {
+/// Where and how to reach the PC.
+pub struct Destination {
     pub host: String,
     pub port: u16,
+    /// The name this computer gives the PC.
+    pub client_name: String,
+    /// The limit for each step of the connection, the user's decisions aside.
+    pub timeout: Duration,
+    /// The RD Gateway to reach this PC through.
+    pub gateway: Option<Gateway>,
+}
+
+/// Account material and resumption state for signing in to the PC.
+// SECURITY: Must never implement `Debug` because `password` lives inside.
+pub struct Credentials {
     /// `user` or `user@domain`; a `DOMAIN\user` form goes in two parts.
     pub username: String,
     pub domain: Option<String>,
     pub password: Zeroizing<String>,
+    /// Signs in with Kerberos rather than NTLM.
+    pub kerberos: Option<Kerberos>,
+    /// Resumes the session this cookie came from, after a dropped connection.
+    pub resume: Option<ResumeCookie>,
+}
+
+/// Remote desktop geometry, pixel format, and scale factor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplaySettings {
     pub width: u16,
     pub height: u16,
     /// The size of each screen, left to right, when the session spans
@@ -74,14 +94,10 @@ pub struct ConnectConfig {
     pub scale: u32,
     /// Bits per pixel: 32, or 16 to ask the PC for fewer colors.
     pub color_depth: u32,
-    /// Lets this PC sign in on its own screen when it does not offer NLA.
-    pub allow_without_nla: bool,
-    /// Where the certificates the user trusted are kept.
-    pub trust_store: TrustStore,
-    /// The limit for each step of the connection, the user's decisions aside.
-    pub timeout: Duration,
-    /// The name this computer gives the PC.
-    pub client_name: String,
+}
+
+/// Local devices and clipboard shared with the PC.
+pub struct SharingSettings {
     /// Shares the clipboard's text with this PC, both ways.
     pub clipboard: bool,
     /// Plays this PC's sound here; `None` leaves it silent.
@@ -90,12 +106,25 @@ pub struct ConnectConfig {
     pub microphone: Option<Box<dyn SoundInput>>,
     /// Local folders this PC sees as drives.
     pub folders: Vec<SharedFolder>,
-    /// The RD Gateway to reach this PC through.
-    pub gateway: Option<Gateway>,
-    /// Signs in with Kerberos rather than NTLM.
-    pub kerberos: Option<Kerberos>,
-    /// Resumes the session this cookie came from, after a dropped connection.
-    pub resume: Option<ResumeCookie>,
+}
+
+/// Certificate trust policy and NLA enforcement.
+pub struct SecuritySettings {
+    /// Where the certificates the user trusted are kept.
+    pub trust_store: TrustStore,
+    /// Lets this PC sign in on its own screen when it does not offer NLA.
+    pub allow_without_nla: bool,
+}
+
+/// What to connect to, and how.
+// SECURITY: Must never implement `Debug` because `credentials` and
+// `destination.gateway` hold secrets.
+pub struct ConnectConfig {
+    pub destination: Destination,
+    pub credentials: Credentials,
+    pub display: DisplaySettings,
+    pub sharing: SharingSettings,
+    pub security: SecuritySettings,
 }
 
 impl ConnectConfig {
@@ -108,27 +137,37 @@ impl ConnectConfig {
         trust_store: TrustStore,
     ) -> Self {
         Self {
-            host,
-            port: 3389,
-            username,
-            domain: None,
-            password,
-            width: 1280,
-            height: 720,
-            monitors: Vec::new(),
-            scale: 100,
-            color_depth: 32,
-            allow_without_nla: false,
-            trust_store,
-            timeout: Duration::from_secs(10),
-            client_name: "Remoport".to_string(),
-            clipboard: false,
-            sound: None,
-            microphone: None,
-            folders: Vec::new(),
-            gateway: None,
-            kerberos: None,
-            resume: None,
+            destination: Destination {
+                host,
+                port: 3389,
+                client_name: "Remoport".to_string(),
+                timeout: Duration::from_secs(10),
+                gateway: None,
+            },
+            credentials: Credentials {
+                username,
+                domain: None,
+                password,
+                kerberos: None,
+                resume: None,
+            },
+            display: DisplaySettings {
+                width: 1280,
+                height: 720,
+                monitors: Vec::new(),
+                scale: 100,
+                color_depth: 32,
+            },
+            sharing: SharingSettings {
+                clipboard: false,
+                sound: None,
+                microphone: None,
+                folders: Vec::new(),
+            },
+            security: SecuritySettings {
+                trust_store,
+                allow_without_nla: false,
+            },
         }
     }
 }
@@ -332,7 +371,7 @@ pub enum Command {
     Resize {
         width: u16,
         height: u16,
-        /// The display scale, as in [`ConnectConfig::scale`].
+        /// The display scale, as in [`DisplaySettings::scale`].
         scale: u32,
     },
     /// The size of each screen, left to right, for a session on several,

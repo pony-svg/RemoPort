@@ -167,7 +167,7 @@ fn realm(username: &str, domain: Option<&str>) -> Option<String> {
 /// Settings Kerberos cannot work with, as notes for the log.
 pub(crate) fn preflight(config: &ConnectConfig) -> Vec<String> {
     let mut notes = Vec::new();
-    let host = config.host.trim().trim_end_matches('.');
+    let host = config.destination.host.trim().trim_end_matches('.');
     let bare = host
         .strip_prefix('[')
         .and_then(|inner| inner.strip_suffix(']'))
@@ -178,7 +178,10 @@ pub(crate) fn preflight(config: &ConnectConfig) -> Vec<String> {
              TERMSRV/<its name>"
         ));
     }
-    match realm(&config.username, config.domain.as_deref()) {
+    match realm(
+        &config.credentials.username,
+        config.credentials.domain.as_deref(),
+    ) {
         None => notes.push(
             "Kerberos needs a domain: sign in as user@example.com or EXAMPLE.COM\\user".to_string(),
         ),
@@ -196,12 +199,15 @@ pub(crate) fn settings(config: &ConnectConfig, kdc: Option<&str>) -> Option<Kerb
     let kdc = kdc
         .and_then(|kdc| normalize_kdc_address(kdc).ok().flatten())
         .or_else(|| fallback_kdc(config, sspi_finds_kdc));
-    KerberosConfig::new(kdc, config.client_name.clone()).ok()
+    KerberosConfig::new(kdc, config.destination.client_name.clone()).ok()
 }
 
 /// The realm's own DNS name as its KDC, unless sspi finds one by itself.
 fn fallback_kdc(config: &ConnectConfig, discover: impl FnOnce(&str) -> bool) -> Option<String> {
-    let realm = realm(&config.username, config.domain.as_deref())?;
+    let realm = realm(
+        &config.credentials.username,
+        config.credentials.domain.as_deref(),
+    )?;
     if discover(&realm) {
         return None;
     }
@@ -291,7 +297,7 @@ mod tests {
             zeroize::Zeroizing::new(String::new()),
             crate::TrustStore::new(std::env::temp_dir().join("unused.json")),
         );
-        config.domain = domain.map(str::to_string);
+        config.credentials.domain = domain.map(str::to_string);
         config
     }
 

@@ -172,7 +172,7 @@ impl Clipboard {
     ) -> Option<Vec<u8>> {
         let size = text.as_str().encode_utf16().count() * 2;
         if size > MAX_TEXT_BYTES {
-            let _ = events.send(Event::Progress(format!(
+            let _ = events.send(Event::Log(format!(
                 "The pasted text ({} KiB) was not sent: more than 1 million characters",
                 size / 1024
             )));
@@ -228,13 +228,13 @@ impl Clipboard {
                         continue;
                     }
                     Signal::Received(Err(why)) => {
-                        let _ = events.send(Event::Progress(why));
+                        let _ = events.send(Event::Log(why));
                         continue;
                     }
                     Signal::Offered(ok) => {
                         self.offered = ok;
                         if !ok {
-                            let _ = events.send(Event::Progress(
+                            let _ = events.send(Event::Log(
                                 "The PC did not take the pasted text".to_string(),
                             ));
                         }

@@ -66,7 +66,7 @@ pub(crate) async fn connect(
     events: &mpsc::Sender<Event>,
 ) -> Result<Established, Error> {
     let progress = |message: String| {
-        let _ = events.send(Event::Progress(message));
+        let _ = events.send(Event::Log(message));
     };
 
     // 1. Reach the PC, directly or through its RD Gateway.
@@ -296,13 +296,13 @@ async fn check_identity(
     let trusted = config.trust_store.trusted(&config.host, config.port);
     match identity::verdict(&chain, trusted.as_deref(), &sha256) {
         Verdict::Verified { issuer } => {
-            let _ = events.send(Event::Progress(format!(
+            let _ = events.send(Event::Log(format!(
                 "Identity verified: certificate issued by {issuer}"
             )));
             Ok(())
         }
         Verdict::Remembered => {
-            let _ = events.send(Event::Progress(format!(
+            let _ = events.send(Event::Log(format!(
                 "Identity: the certificate you trusted for this PC ({sha256})"
             )));
             Ok(())
@@ -321,11 +321,11 @@ async fn check_identity(
             match timeout(IDENTITY_DECISION, answer).await {
                 Ok(Ok(true)) => {
                     if let Err(e) = config.trust_store.remember(&info) {
-                        let _ = events.send(Event::Progress(format!(
+                        let _ = events.send(Event::Log(format!(
                             "The certificate could not be remembered, you will be asked again: {e}"
                         )));
                     }
-                    let _ = events.send(Event::Progress(format!(
+                    let _ = events.send(Event::Log(format!(
                         "You trusted this PC's certificate ({})",
                         info.sha256
                     )));

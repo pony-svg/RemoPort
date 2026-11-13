@@ -218,7 +218,7 @@ impl Workload {
 impl Drop for Workload {
     fn drop(&mut self) {
         let summary = self.summary(self.began.elapsed());
-        let _ = self.events.send(Event::Progress(summary));
+        let _ = self.events.send(Event::Log(summary));
     }
 }
 
@@ -321,9 +321,7 @@ where
             }
         }
         ActiveStageOutput::Terminate(reason) => {
-            let _ = events.send(Event::Progress(format!(
-                "The PC ended the session ({reason:?})"
-            )));
+            let _ = events.send(Event::Log(format!("The PC ended the session ({reason:?})")));
             return Ok(true);
         }
         ActiveStageOutput::DeactivateAll => {
@@ -340,7 +338,7 @@ where
             )));
         }
         ActiveStageOutput::AutoReconnectFailed => {
-            let _ = events.send(Event::Progress(
+            let _ = events.send(Event::Log(
                 "The PC did not resume the earlier session; it signed in anew".to_string(),
             ));
         }
@@ -482,7 +480,7 @@ async fn apply_command(
                     let _ = writer.write_all(&frame).await;
                 }
                 Err(e) => {
-                    let _ = events.send(Event::Progress(format!("Screen layout not sent: {e}")));
+                    let _ = events.send(Event::Log(format!("Screen layout not sent: {e}")));
                 }
             }
             return;
@@ -497,10 +495,10 @@ async fn apply_command(
                     let _ = writer.write_all(&frame).await;
                 }
                 Some(Err(e)) => {
-                    let _ = events.send(Event::Progress(format!("Resize request failed: {e}")));
+                    let _ = events.send(Event::Log(format!("Resize request failed: {e}")));
                 }
                 None => {
-                    let _ = events.send(Event::Progress(
+                    let _ = events.send(Event::Log(
                         "The PC cannot change its desktop size during the session".to_string(),
                     ));
                 }

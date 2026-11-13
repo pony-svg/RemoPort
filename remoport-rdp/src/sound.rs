@@ -143,7 +143,7 @@ impl RdpsndClientHandler for Handler {
 
     fn close(&mut self) {
         if self.arrivals.blocks > 0 {
-            let _ = self.events.send(Event::Progress(self.arrivals.summary()));
+            let _ = self.events.send(Event::Log(self.arrivals.summary()));
         }
         self.arrivals = Arrivals::default();
         self.output.stop();

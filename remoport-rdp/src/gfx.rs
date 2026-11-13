@@ -54,7 +54,7 @@ impl GraphicsPipelineHandler for Handler {
         if let GfxPdu::WireToSurface1(wire) = pdu {
             self.undecodable = self.undecodable.saturating_add(1);
             if self.undecodable == UNDECODABLE_THRESHOLD {
-                let _ = self.events.send(Event::Progress(format!(
+                let _ = self.events.send(Event::Log(format!(
                     "The PC sends graphics in a format Remoport cannot decode ({:?})",
                     wire.codec_id
                 )));

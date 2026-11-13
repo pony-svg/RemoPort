@@ -143,7 +143,7 @@ impl DriveBackend {
                         || "Folder".to_string(),
                         |n| n.to_string_lossy().into_owned(),
                     );
-                    let _ = events.send(Event::Progress(format!(
+                    let _ = events.send(Event::Log(format!(
                         "Sharing {} as \\\\tsclient\\{name}{}",
                         root.display(),
                         if folder.read_only {
@@ -162,7 +162,7 @@ impl DriveBackend {
                     );
                 }
                 _ => {
-                    let _ = events.send(Event::Progress(format!(
+                    let _ = events.send(Event::Log(format!(
                         "The shared folder {} was not found; it is not shared",
                         folder.path.display()
                     )));
@@ -185,9 +185,9 @@ impl DriveBackend {
     fn report(&mut self, message: String) {
         self.reported += 1;
         if self.reported <= MAX_REPORTED {
-            let _ = self.events.send(Event::Progress(message));
+            let _ = self.events.send(Event::Log(message));
         } else if self.reported == MAX_REPORTED + 1 {
-            let _ = self.events.send(Event::Progress(
+            let _ = self.events.send(Event::Log(
                 "Further refused attempts on the shared folders are not logged".to_string(),
             ));
         }
@@ -370,7 +370,7 @@ impl DriveBackend {
                     self.used = true;
                     let _ = self
                         .events
-                        .send(Event::Progress("The PC opened a shared folder".to_string()));
+                        .send(Event::Log("The PC opened a shared folder".to_string()));
                 }
                 let file_id = self.alloc_file_id();
                 self.open.insert(
@@ -1421,7 +1421,7 @@ mod tests {
         let log: Vec<String> = received
             .try_iter()
             .filter_map(|e| match e {
-                Event::Progress(line) => Some(line),
+                Event::Log(line) => Some(line),
                 _ => None,
             })
             .collect();
@@ -1664,7 +1664,7 @@ mod tests {
         assert!(
             received
                 .try_iter()
-                .any(|e| matches!(e, Event::Progress(m) if m.contains("not found")))
+                .any(|e| matches!(e, Event::Log(m) if m.contains("not found")))
         );
     }
 

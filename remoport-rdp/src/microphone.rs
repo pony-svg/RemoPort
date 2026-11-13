@@ -195,7 +195,7 @@ impl Handler {
             || format.bits_per_sample != 16
             || format.n_channels == 0
         {
-            let _ = self.events.send(Event::Progress(format!(
+            let _ = self.events.send(Event::Log(format!(
                 "The PC asked for the microphone in a format not offered: {}",
                 describe(format)
             )));
@@ -210,7 +210,7 @@ impl Handler {
                 packets,
             )
         });
-        let _ = self.events.send(Event::Progress(if started {
+        let _ = self.events.send(Event::Log(if started {
             format!(
                 "The PC opened the microphone ({} Hz, {} ch)",
                 format.n_samples_per_sec, format.n_channels
@@ -242,7 +242,7 @@ impl RdpeaiCaptureHandler for Handler {
             .filter(|format| server_formats.contains(format))
             .count();
         let offered: Vec<String> = server_formats.iter().take(16).map(describe).collect();
-        let _ = self.events.send(Event::Progress(format!(
+        let _ = self.events.send(Event::Log(format!(
             "Microphone: the PC offers {} formats, {common} usable here: {}",
             server_formats.len(),
             offered.join("; ")
@@ -257,7 +257,7 @@ impl RdpeaiCaptureHandler for Handler {
         packet_size: usize,
         sink: AudioPacketSink,
     ) -> i32 {
-        let _ = self.events.send(Event::Progress(format!(
+        let _ = self.events.send(Event::Log(format!(
             "Microphone: the PC asks to capture {} and receive {}",
             describe(capture_format),
             describe(encode_format)
@@ -298,9 +298,9 @@ impl RdpeaiCaptureHandler for Handler {
             let (packet_bytes, rate) = self.capturing;
             let _ = self
                 .events
-                .send(Event::Progress(self.delivery.summary(packet_bytes, rate)));
+                .send(Event::Log(self.delivery.summary(packet_bytes, rate)));
         }
-        let _ = self.events.send(Event::Progress(
+        let _ = self.events.send(Event::Log(
             if was_open {
                 "The PC closed the microphone"
             } else {
@@ -466,7 +466,7 @@ mod tests {
         let log: Vec<String> = received
             .try_iter()
             .filter_map(|e| match e {
-                Event::Progress(line) => Some(line),
+                Event::Log(line) => Some(line),
                 _ => None,
             })
             .collect();

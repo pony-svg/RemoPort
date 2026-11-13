@@ -266,8 +266,8 @@ impl std::fmt::Debug for TrustReply {
 /// What the engine reports.
 #[derive(Debug)]
 pub enum Event {
-    /// A step of the connection, for the log.
-    Progress(String),
+    /// A step of the connection or session runtime, for the log.
+    Log(String),
     /// The PC's identity needs the user's decision before anything is sent.
     VerifyIdentity {
         info: CertificateInfo,

@@ -88,12 +88,12 @@ fn scratch_store(name: &str) -> (std::path::PathBuf, TrustStore) {
     (dir, store)
 }
 
-/// The next event that is not progress, within ten seconds.
+/// The next event that is not a log entry, within ten seconds.
 async fn next_event(session: &Session) -> Event {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match session.try_event() {
-            Some(Event::Progress(_)) => {}
+            Some(Event::Log(_)) => {}
             Some(event) => return event,
             None if Instant::now() > deadline => panic!("no event from the engine"),
             None => tokio::time::sleep(Duration::from_millis(10)).await,

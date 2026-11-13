@@ -362,7 +362,7 @@ impl ActiveSession {
 
     fn handle(&mut self, event: EngineEvent) {
         match event {
-            EngineEvent::Progress(message) => logging::event(message),
+            EngineEvent::Log(message) => logging::event(message),
             EngineEvent::VerifyIdentity {
                 info,
                 problem,

@@ -170,7 +170,7 @@ impl SessionController {
             session.disconnect();
             // What the engine said on its way out still belongs in the log.
             while let Some(event) = session.try_event() {
-                if let EngineEvent::Progress(message) = event {
+                if let EngineEvent::Log(message) = event {
                     logging::event(message);
                 }
             }

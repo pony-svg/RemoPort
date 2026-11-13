@@ -5,7 +5,7 @@
 //! has them, and bring a dropped connection back to the same session.
 
 use crate::domain::{AudioPlaybackMode, DeviceBookmark};
-use crate::i18n::{t, tf};
+use crate::i18n::t;
 use crate::key_grab::KeyGrab;
 use crate::keymap;
 use crate::logging;
@@ -174,10 +174,7 @@ impl ActiveSession {
     fn start(&mut self, timeout: Duration) -> bool {
         let Some(trust_store) = store::trust_store_path().map(TrustStore::new) else {
             self.forget_session();
-            self.controller.phase = Phase::Ended(
-                t("Remoport has no folder to keep trusted certificates in (HOME is not set).")
-                    .to_string(),
-            );
+            self.controller.phase = Phase::Ended(EndReason::NoTrustStoreFolder);
             return false;
         };
         let target = self.bookmark.pc_name.trim().to_string();
@@ -486,11 +483,11 @@ impl ActiveSession {
                 }
                 logging::event("Gave up reconnecting");
                 self.forget_session();
-                self.controller.phase = Phase::Ended(tf(
-                    "The connection to {} was lost and could not be brought back after {} \
-                     attempts ({}).",
-                    &[&self.bookmark.pc_name, &MAX_RECONNECTS, error],
-                ));
+                self.controller.phase = Phase::Ended(EndReason::ReconnectExhausted {
+                    pc_name: self.bookmark.pc_name.clone(),
+                    attempts: MAX_RECONNECTS,
+                    detail: error.to_string(),
+                });
                 return;
             }
         }
@@ -499,7 +496,7 @@ impl ActiveSession {
             None => {
                 logging::event("Session ended");
                 if !matches!(self.controller.phase, Phase::Ended(_)) {
-                    self.controller.phase = Phase::Ended(t("The session ended.").to_string());
+                    self.controller.phase = Phase::Ended(EndReason::ClosedByRemote);
                 }
             }
             Some(error) => {
@@ -507,33 +504,27 @@ impl ActiveSession {
                 match error {
                     Error::Authentication(_) => {
                         let was_saved = self.signin.on_auth_failed();
-                        let message = if was_saved {
-                            t("The PC refused the saved password. Type it again.")
+                        let kind = if was_saved {
+                            SignInError::RefusedSavedPassword
                         } else {
-                            t("The PC refused the sign-in. Check the user name and password.")
+                            SignInError::RefusedCredentials
                         };
-                        self.signin.sign_in_error = Some(message.to_string());
+                        self.signin.sign_in_error = Some(kind);
                         self.controller.phase = Phase::SignIn;
                     }
                     Error::NlaUnavailable => {
-                        self.controller.phase = Phase::Ended(tf(
-                            "{} does not offer Network Level Authentication, so it would show \
-                             its sign-in screen before checking who you are. Remoport does not \
-                             connect that way unless you allow it for this PC (Edit → General), \
-                             which is less secure.",
-                            &[&self.bookmark.pc_name],
-                        ));
+                        self.controller.phase = Phase::Ended(EndReason::NlaUnavailable {
+                            pc_name: self.bookmark.pc_name.clone(),
+                        });
                     }
                     Error::IdentityRejected => {
-                        self.controller.phase = Phase::Ended(
-                            t(
-                                "You chose not to connect: the PC's identity was not confirmed. \
-                             Nothing was sent to it.",
-                            )
-                            .to_string(),
-                        );
+                        self.controller.phase = Phase::Ended(EndReason::IdentityRejected);
                     }
-                    other => self.controller.phase = Phase::Ended(explain(&other)),
+                    other => {
+                        self.controller.phase = Phase::Ended(EndReason::ConnectionFailed(
+                            ConnectionFailure::from_error(&other),
+                        ));
+                    }
                 }
             }
         }
@@ -992,9 +983,10 @@ mod tests {
             assert!(view.signin.session_password.is_some());
         }
         view.session_ended(Some(Error::Timeout("reaching the PC")));
-        assert!(
-            matches!(view.controller.phase, Phase::Ended(ref why) if why.contains("could not be brought back"))
-        );
+        assert!(matches!(
+            view.controller.phase,
+            Phase::Ended(EndReason::ReconnectExhausted { .. })
+        ));
         assert!(
             view.signin.session_password.is_none(),
             "the password outlived the session"

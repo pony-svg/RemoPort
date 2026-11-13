@@ -111,8 +111,8 @@ pub(super) fn render(
         Phase::Connected => screen::remote_screens(session, ui),
         Phase::Reconnecting { attempt, .. } => reconnecting(session, ui, attempt),
         Phase::Ended(ref reason) => {
-            let reason = reason.clone();
-            ended(session, ui, theme, &reason);
+            let text = crate::i18n::end_reason_text(reason);
+            ended(session, ui, theme, &text);
         }
     }
 
@@ -150,7 +150,7 @@ fn reconnecting(session: &mut ActiveSession, ui: &mut Ui, attempt: u32) {
             logging::event("Stopped reconnecting");
             session.reset_session();
             session.forget_session();
-            session.controller.phase = Phase::Ended(t("You stopped reconnecting.").to_string());
+            session.controller.phase = Phase::Ended(crate::session::EndReason::StoppedReconnecting);
         }
     });
 }

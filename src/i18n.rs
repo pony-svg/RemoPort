@@ -68,6 +68,77 @@ pub fn resolution_label(option: &crate::domain::ResolutionOption) -> String {
     }
 }
 
+/// Localized sign-in rejection message.
+pub fn sign_in_error_text(error: crate::session::SignInError) -> &'static str {
+    use crate::session::SignInError;
+    match error {
+        SignInError::RefusedSavedPassword => t("The PC refused the saved password. Type it again."),
+        SignInError::RefusedCredentials => {
+            t("The PC refused the sign-in. Check the user name and password.")
+        }
+    }
+}
+
+/// Localized message explaining why a remote session ended.
+pub fn end_reason_text(reason: &crate::session::controller::EndReason) -> String {
+    use crate::session::controller::EndReason;
+    match reason {
+        EndReason::NoTrustStoreFolder => {
+            t("Remoport has no folder to keep trusted certificates in (HOME is not set).")
+                .to_string()
+        }
+        EndReason::ReconnectExhausted {
+            pc_name,
+            attempts,
+            detail,
+        } => tf(
+            "The connection to {} was lost and could not be brought back after {} attempts ({}).",
+            &[pc_name, attempts, detail],
+        ),
+        EndReason::ClosedByRemote => t("The session ended.").to_string(),
+        EndReason::NlaUnavailable { pc_name } => tf(
+            "{} does not offer Network Level Authentication, so it would show \
+             its sign-in screen before checking who you are. Remoport does not \
+             connect that way unless you allow it for this PC (Edit → General), \
+             which is less secure.",
+            &[pc_name],
+        ),
+        EndReason::IdentityRejected => t(
+            "You chose not to connect: the PC's identity was not confirmed. \
+             Nothing was sent to it.",
+        )
+        .to_string(),
+        EndReason::StoppedReconnecting => t("You stopped reconnecting.").to_string(),
+        EndReason::ConnectionFailed(failure) => connection_failure_text(failure),
+    }
+}
+
+fn connection_failure_text(failure: &crate::session::controller::ConnectionFailure) -> String {
+    use crate::session::controller::FailureKind;
+    let detail = &failure.detail;
+    if !spanish() {
+        return capitalize(detail);
+    }
+    match failure.kind {
+        FailureKind::Unreachable => format!("No se pudo llegar al PC: {detail}"),
+        FailureKind::Timeout => format!("El PC tardó demasiado en responder: {detail}"),
+        FailureKind::Gateway => format!("El RD Gateway no abrió el camino al PC: {detail}"),
+        FailureKind::ConnectionLost => format!("Se perdió la conexión: {detail}"),
+        FailureKind::BrokerRedirect => {
+            "El PC envió la sesión a otro servidor, y aún no se admiten los agentes de conexión."
+                .to_string()
+        }
+        FailureKind::Other => format!("La conexión falló: {detail}"),
+    }
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect::<String>() + "."
+    })
+}
+
 /// English and Spanish, by the English text.
 const TABLE: &[(&str, &str)] = &[
     (

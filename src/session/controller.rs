@@ -48,8 +48,63 @@ pub enum Phase {
         attempt: u32,
         at: Option<Instant>,
     },
-    /// The session is over; holds what to tell the user.
-    Ended(String),
+    /// The session is over; holds the structured reason for the UI.
+    Ended(EndReason),
+}
+
+/// High-level category for a connection failure shown to the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    Unreachable,
+    Timeout,
+    Gateway,
+    ConnectionLost,
+    BrokerRedirect,
+    Other,
+}
+
+/// Structured connection failure holding the failure kind and technical detail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionFailure {
+    pub kind: FailureKind,
+    pub detail: String,
+}
+
+impl ConnectionFailure {
+    /// Classifies an engine error without translating it for the UI.
+    #[must_use]
+    pub fn from_error(error: &Error) -> Self {
+        let kind = match error {
+            Error::Unreachable(_) => FailureKind::Unreachable,
+            Error::Timeout(_) => FailureKind::Timeout,
+            Error::Gateway(_) => FailureKind::Gateway,
+            Error::ConnectionLost(_) => FailureKind::ConnectionLost,
+            Error::BrokerRedirect => FailureKind::BrokerRedirect,
+            _ => FailureKind::Other,
+        };
+        Self {
+            kind,
+            detail: error.to_string(),
+        }
+    }
+}
+
+/// Reason a session ended, kept free of localized UI prose (R6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EndReason {
+    NoTrustStoreFolder,
+    ReconnectExhausted {
+        pc_name: String,
+        attempts: u32,
+        detail: String,
+    },
+    ClosedByRemote,
+    NlaUnavailable {
+        pc_name: String,
+    },
+    IdentityRejected,
+    StoppedReconnecting,
+    ConnectionFailed(ConnectionFailure),
 }
 
 /// The state of the active connection and its lifecycle phase.
@@ -183,34 +238,6 @@ pub fn reconnect_delay(attempt: u32) -> Duration {
         2 => 2,
         3 => 4,
         _ => 5,
-    })
-}
-
-/// What an engine failure means. The engine's own words carry the detail,
-/// in English; in Spanish a lead-in says what happened.
-#[must_use]
-pub fn explain(error: &Error) -> String {
-    let detail = error.to_string();
-    if !crate::i18n::spanish() {
-        return capitalize(&detail);
-    }
-    match error {
-        Error::Unreachable(_) => format!("No se pudo llegar al PC: {detail}"),
-        Error::Timeout(_) => format!("El PC tardó demasiado en responder: {detail}"),
-        Error::Gateway(_) => format!("El RD Gateway no abrió el camino al PC: {detail}"),
-        Error::ConnectionLost(_) => format!("Se perdió la conexión: {detail}"),
-        Error::BrokerRedirect => {
-            "El PC envió la sesión a otro servidor, y aún no se admiten los agentes de conexión."
-                .to_string()
-        }
-        _ => format!("La conexión falló: {detail}"),
-    }
-}
-
-fn capitalize(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect::<String>() + "."
     })
 }
 

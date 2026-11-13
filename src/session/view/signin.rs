@@ -80,9 +80,9 @@ pub(super) fn sign_in_form(session: &mut ActiveSession, ui: &mut Ui, theme: &The
             session.signin.forget_saved(session.bookmark.id);
         }
 
-        if let Some(error) = &session.signin.sign_in_error {
+        if let Some(error) = session.signin.sign_in_error {
             ui.add_space(8.0);
-            ui.colored_label(DANGER, error);
+            ui.colored_label(DANGER, crate::i18n::sign_in_error_text(error));
         }
         ui.add_space(16.0);
         submit |= ui

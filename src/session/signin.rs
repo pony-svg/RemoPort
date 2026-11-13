@@ -23,6 +23,13 @@ pub enum KeyringEvent {
     Failed(String),
 }
 
+/// Reason a sign-in attempt was rejected, formatted in the UI layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignInError {
+    RefusedSavedPassword,
+    RefusedCredentials,
+}
+
 /// The 12 fields tracking credentials, passwords, and reconnection tokens.
 pub struct SignInState {
     /// Username typed or loaded from bookmark.
@@ -39,8 +46,8 @@ pub struct SignInState {
     pub keyring: Option<Pending>,
     /// Password to remember in the keyring once connection succeeds.
     pub to_remember: Option<Zeroizing<String>>,
-    /// Error message from a failed sign-in attempt.
-    pub sign_in_error: Option<String>,
+    /// Error from a failed sign-in attempt.
+    pub sign_in_error: Option<SignInError>,
     /// Password kept in memory for reconnecting; wiped when session ends.
     pub session_password: Option<Zeroizing<String>>,
     /// Gateway password entered in the form; zeroized when sent.

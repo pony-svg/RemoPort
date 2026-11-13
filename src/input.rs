@@ -420,6 +420,12 @@ impl KeyState {
     pub fn has_held_keys(&self) -> bool {
         !self.held.is_empty()
     }
+
+    /// Whether either Left Alt or Right Alt is currently held down.
+    #[must_use]
+    pub fn is_alt_held(&self) -> bool {
+        self.alt_held
+    }
 }
 
 #[cfg(test)]
@@ -632,5 +638,41 @@ mod tests {
             InputAction::SendKey { pressed, .. } => !pressed,
             _ => false,
         }));
+    }
+
+    #[test]
+    fn physical_source_clipboard_events_do_not_duplicate_keys() {
+        let mut state = KeyState::new(true, true);
+        let t0 = Instant::now();
+
+        // When Ctrl+C is pressed physically:
+        state.handle_physical_key(29, true, t0); // Ctrl
+        let actions = state.handle_physical_key(46, true, t0); // C
+        assert_eq!(
+            actions,
+            vec![InputAction::SendKey {
+                scancode: 0x2E,
+                extended: false,
+                pressed: true,
+            }]
+        );
+
+        // When Ctrl+X is pressed physically:
+        let actions = state.handle_physical_key(45, true, t0); // X
+        assert_eq!(
+            actions,
+            vec![InputAction::SendKey {
+                scancode: 0x2D,
+                extended: false,
+                pressed: true,
+            }]
+        );
+
+        // When egui sends Paste, it only emits InputAction::Paste, never SendKey
+        let paste_actions = state.handle_egui_paste("sample".to_string(), t0);
+        assert_eq!(
+            paste_actions,
+            vec![InputAction::Paste("sample".to_string())]
+        );
     }
 }

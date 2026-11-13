@@ -1,27 +1,14 @@
-//! A keyboard of our own on the window's Wayland connection, for what egui on
-//! Linux does not report, while a session is connected:
-//! - the lock keys: when Caps Lock or Num Lock change here, the PC follows, so
-//!   typing means the same on both;
-//! - in full screen, the desktop's own shortcuts go to the PC. The compositor
-//!   is asked to hold them back for this window
-//!   (`zwp_keyboard_shortcuts_inhibit_v1`), so Alt+Tab and the like arrive
-//!   through egui like any other key, and the Windows key, which egui never
-//!   reports, comes through this keyboard.
-//!
-//! Ctrl+Alt+Enter leaves full screen and hands the shortcuts back. On X11, or
-//! where the compositor does not offer this, the Keys menu still sends them.
-//!
-//! ponytail: only the main window can ask, because eframe does not hand out
-//! the other screens' windows; a further screen's window keeps the desktop's
-//! shortcuts until that changes.
+//! A keyboard of our own on the window's Wayland connection:
+//! captures physical key events, lock states, focus enter/leave, and
+//! desktop shortcut inhibition while in full screen. Events are forwarded
+//! to the UI thread via a channel.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::thread::JoinHandle;
 
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
-use remoport_rdp::{Command, Commander};
 use wayland_backend::client::{Backend, ObjectId};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
@@ -34,8 +21,23 @@ use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::zwp_keyboard
     self, ZwpKeyboardShortcutsInhibitorV1,
 };
 
-use crate::keymap::{self, Scancode};
 use crate::logging;
+
+/// An event from the Wayland keyboard listener sent to the UI thread.
+#[derive(Debug, Clone)]
+pub enum WaylandKeyEvent {
+    /// Physical key pressed or released by evdev keycode.
+    Key { evdev: u32, pressed: bool },
+    /// Caps Lock and Num Lock states changed.
+    Modifiers { caps: bool, num: bool },
+    /// Window gained keyboard focus, with keys already held down.
+    Enter { keys: Vec<u32> },
+    /// Window lost keyboard focus.
+    Leave,
+    /// Autorepeat event for the active key.
+    #[allow(dead_code)]
+    Repeat { evdev: u32 },
+}
 
 /// The main window's Wayland display and surface, as addresses.
 #[derive(Clone, Copy)]
@@ -64,50 +66,46 @@ pub fn remember_window(frame: &eframe::Frame) {
     });
 }
 
-/// The session's keyboard, for as long as this lives.
+/// The session's keyboard listener on Wayland.
 pub struct KeyGrab {
     stop: Arc<AtomicBool>,
-    active: Arc<AtomicBool>,
     fullscreen: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl KeyGrab {
-    /// Starts holding the shortcuts back, or says why it cannot.
-    pub fn start(commander: Commander) -> Option<Self> {
+    /// Starts capturing physical keyboard events on Wayland, sending them through `sender`
+    /// and waking the UI thread with `wakeup`.
+    pub fn start(
+        sender: mpsc::Sender<WaylandKeyEvent>,
+        wakeup: Box<dyn Fn() + Send + Sync>,
+    ) -> Option<Self> {
         let Some(Some(window)) = WINDOW.get().copied() else {
-            logging::event("This desktop is not Wayland: use the Keys menu for reserved keys");
+            logging::event("This desktop is not Wayland: using window keyboard fallback");
             return None;
         };
         let stop = Arc::new(AtomicBool::new(false));
-        let active = Arc::new(AtomicBool::new(false));
         let fullscreen = Arc::new(AtomicBool::new(false));
         let shared = Shared {
-            active: Arc::clone(&active),
             fullscreen: Arc::clone(&fullscreen),
         };
         let stopped = Arc::clone(&stop);
+        let wakeup: Arc<dyn Fn() + Send + Sync> = Arc::from(wakeup);
         let thread = std::thread::Builder::new()
             .name("remoport-keys".to_string())
             .spawn(move || {
-                if let Err(why) = run(window, commander, &stopped, shared) {
+                if let Err(why) = run(window, sender, wakeup, &stopped, shared) {
                     logging::event(format_args!(
-                        "Reserved keys stay with this desktop ({why}): use the Keys menu"
+                        "Physical keys unavailable on Wayland ({why}): using window fallback"
                     ));
                 }
             })
             .ok()?;
         Some(Self {
             stop,
-            active,
             fullscreen,
             thread: Some(thread),
         })
-    }
-
-    /// Whether the session has the keyboard, so keys go to the PC.
-    pub fn set_active(&self, active: bool) {
-        self.active.store(active, Ordering::Relaxed);
     }
 
     /// Whether the window is in full screen, so the desktop's shortcuts are
@@ -126,29 +124,8 @@ impl Drop for KeyGrab {
     }
 }
 
-/// The set-1 scancode for a key egui does not report, by its Linux key code.
-fn scancode(evdev: u32) -> Option<Scancode> {
-    match evdev {
-        125 => Some(keymap::WINDOWS),
-        126 => Some(keymap::WINDOWS_RIGHT),
-        127 => Some(keymap::MENU),
-        99 => Some(keymap::PRINT_SCREEN),
-        _ => None,
-    }
-}
-
-/// A key's name for the log.
-fn name(code: Scancode) -> &'static str {
-    match code {
-        keymap::MENU => "the Menu key",
-        keymap::PRINT_SCREEN => "Print Screen",
-        _ => "the Windows key",
-    }
-}
-
 /// Set by the session each frame.
 struct Shared {
-    active: Arc<AtomicBool>,
     fullscreen: Arc<AtomicBool>,
 }
 
@@ -159,33 +136,17 @@ const fn lock_keys(mods_locked: u32) -> (bool, bool) {
 }
 
 struct State {
-    commander: Commander,
+    sender: mpsc::Sender<WaylandKeyEvent>,
+    wakeup: Arc<dyn Fn() + Send + Sync>,
     shared: Shared,
     keyboard: Option<WlKeyboard>,
-    held: Vec<Scancode>,
-    /// The lock keys the PC was last told about.
     locks: Option<(bool, bool)>,
-}
-
-impl State {
-    fn send(&self, (scancode, extended): Scancode, pressed: bool) {
-        self.commander.send(Command::Key {
-            scancode,
-            extended,
-            pressed,
-        });
-    }
-
-    fn release_all(&mut self) {
-        for key in std::mem::take(&mut self.held) {
-            self.send(key, false);
-        }
-    }
 }
 
 fn run(
     window: WindowPointers,
-    commander: Commander,
+    sender: mpsc::Sender<WaylandKeyEvent>,
+    wakeup: Arc<dyn Fn() + Send + Sync>,
     stop: &AtomicBool,
     shared: Shared,
 ) -> Result<(), String> {
@@ -216,10 +177,10 @@ fn run(
     }
     let mut inhibitor: Option<ZwpKeyboardShortcutsInhibitorV1> = None;
     let mut state = State {
-        commander,
+        sender,
+        wakeup,
         shared,
         keyboard: None,
-        held: Vec::new(),
         locks: None,
     };
 
@@ -249,7 +210,9 @@ fn run(
         }
     }
 
-    state.release_all();
+    let _ = state.sender.send(WaylandKeyEvent::Leave);
+    (state.wakeup)();
+
     if let Some(held_back) = inhibitor.take() {
         held_back.destroy();
         logging::event("Reserved keys are back with this desktop");
@@ -316,29 +279,12 @@ impl Dispatch<WlKeyboard, ()> for State {
                 state: WEnum::Value(key_state),
                 ..
             } => {
-                let Some(code) = scancode(key) else {
-                    return;
-                };
                 let pressed = key_state == wl_keyboard::KeyState::Pressed;
-                // In a window these keys are the desktop's own.
-                if !state.shared.fullscreen.load(Ordering::Relaxed) {
-                    if !pressed && state.held.contains(&code) {
-                        state.held.retain(|held| *held != code);
-                        state.send(code, false);
-                    }
-                } else if pressed && state.shared.active.load(Ordering::Relaxed) {
-                    logging::event(format_args!("Sent {}", name(code)));
-                    state.held.push(code);
-                    state.send(code, true);
-                } else if pressed {
-                    logging::event(format_args!(
-                        "{} not sent: click the remote screen to give it the keyboard",
-                        name(code)
-                    ));
-                } else if state.held.contains(&code) {
-                    state.held.retain(|held| *held != code);
-                    state.send(code, false);
-                }
+                let _ = state.sender.send(WaylandKeyEvent::Key {
+                    evdev: key,
+                    pressed,
+                });
+                (state.wakeup)();
             }
             wl_keyboard::Event::Modifiers { mods_locked, .. } => {
                 let locks = lock_keys(mods_locked);
@@ -350,14 +296,24 @@ impl Dispatch<WlKeyboard, ()> for State {
                         if caps { "on" } else { "off" },
                         if num { "on" } else { "off" },
                     ));
-                    state.commander.send(Command::LockKeys {
-                        caps,
-                        num,
-                        scroll: false,
-                    });
+                    let _ = state.sender.send(WaylandKeyEvent::Modifiers { caps, num });
+                    (state.wakeup)();
                 }
             }
-            wl_keyboard::Event::Leave { .. } => state.release_all(),
+            wl_keyboard::Event::Enter { keys, .. } => {
+                let keys = keys
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| u32::from_ne_bytes(*b))
+                    .collect();
+                let _ = state.sender.send(WaylandKeyEvent::Enter { keys });
+                (state.wakeup)();
+            }
+            wl_keyboard::Event::Leave { .. } => {
+                let _ = state.sender.send(WaylandKeyEvent::Leave);
+                (state.wakeup)();
+            }
             _ => {}
         }
     }
@@ -412,14 +368,10 @@ mod tests {
 
     #[test]
     fn only_the_keys_egui_drops_are_taken_here() {
-        assert_eq!(scancode(125), Some(keymap::WINDOWS));
-        assert_eq!(scancode(126), Some(keymap::WINDOWS_RIGHT));
-        assert_eq!(scancode(127), Some(keymap::MENU));
-        assert_eq!(scancode(99), Some(keymap::PRINT_SCREEN));
-        // Tab and the letters arrive through egui; sending them here too
-        // would type them twice.
-        for evdev in [15, 19, 30, 56, 29] {
-            assert_eq!(scancode(evdev), None);
-        }
+        assert!(crate::input::is_desktop_reserved(125));
+        assert!(crate::input::is_desktop_reserved(126));
+        assert!(crate::input::is_desktop_reserved(127));
+        assert!(!crate::input::is_desktop_reserved(15));
+        assert!(!crate::input::is_desktop_reserved(30));
     }
 }

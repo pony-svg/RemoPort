@@ -18,7 +18,9 @@ pub const X: Scancode = (0x2D, false);
 pub const V: Scancode = (0x2F, false);
 /// Keys egui on Linux never reports, sent from the session's Keys menu.
 pub const WINDOWS: Scancode = (0x5B, true);
+#[allow(dead_code)]
 pub const WINDOWS_RIGHT: Scancode = (0x5C, true);
+#[allow(dead_code)]
 pub const MENU: Scancode = (0x5D, true);
 pub const ESCAPE: Scancode = (0x01, false);
 pub const TAB: Scancode = (0x0F, false);

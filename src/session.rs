@@ -232,8 +232,12 @@ pub struct ActiveSession {
     key_grab_tried: bool,
     /// Where the bar lies while it shows over a full-screen session.
     bar_rect: Option<Rect>,
-    /// Keys pressed on the remote side and not yet released.
-    keys_down: HashSet<keymap::Scancode>,
+    /// Events from the physical Wayland keyboard listener.
+    wayland_keys_rx: Option<std::sync::mpsc::Receiver<crate::key_grab::WaylandKeyEvent>>,
+    /// State machine tracking physical and fallback keys.
+    input_state: crate::input::KeyState,
+    /// Keys pressed via egui fallback when Wayland is not available.
+    fallback_keys_down: HashSet<keymap::Scancode>,
     /// Windows the session spans, one per screen.
     screens: usize,
     /// Each window's drawing area in physical pixels, the main one first.
@@ -252,6 +256,7 @@ impl ActiveSession {
     pub fn new(bookmark: DeviceBookmark, saved: bool) -> Self {
         let keyring = saved.then(|| credentials::lookup(bookmark.id));
         let screens = usize::from(bookmark.screens.clamp(1, 4));
+        let share_clipboard = bookmark.share_clipboard;
         Self {
             username: bookmark.username.clone(),
             bookmark,
@@ -291,7 +296,9 @@ impl ActiveSession {
             key_grab: None,
             key_grab_tried: false,
             bar_rect: None,
-            keys_down: HashSet::new(),
+            wayland_keys_rx: None,
+            input_state: crate::input::KeyState::new(false, share_clipboard),
+            fallback_keys_down: HashSet::new(),
             screens,
             screen_px: vec![(1280, 720); screens],
             remote_monitors: Vec::new(),
@@ -331,13 +338,17 @@ impl ActiveSession {
 
         if !matches!(self.phase, Phase::Connected) {
             self.key_grab = None;
+            self.wayland_keys_rx = None;
             self.key_grab_tried = false;
         } else if !self.key_grab_tried {
             self.key_grab_tried = true;
-            self.key_grab = self
-                .session
-                .as_ref()
-                .and_then(|session| KeyGrab::start(session.commander()));
+            let (tx, rx) = std::sync::mpsc::channel();
+            let ctx = ui.ctx().clone();
+            let wakeup = Box::new(move || ctx.request_repaint());
+            self.key_grab = KeyGrab::start(tx, wakeup);
+            if self.key_grab.is_some() {
+                self.wayland_keys_rx = Some(rx);
+            }
         }
         if let Some(grab) = &self.key_grab {
             grab.set_fullscreen(fullscreen);
@@ -1120,7 +1131,9 @@ impl ActiveSession {
         self.key_grab_tried = false;
         self.pointer = PointerLook::System;
         self.new_pointer = None;
-        self.keys_down.clear();
+        self.wayland_keys_rx = None;
+        self.input_state.handle_leave();
+        self.fallback_keys_down.clear();
         self.bar_rect = None;
         self.remote_monitors.clear();
         self.requested_layout = None;
@@ -1139,6 +1152,109 @@ impl ActiveSession {
             extended,
             pressed,
         });
+    }
+
+    fn execute_input_actions(
+        &mut self,
+        actions: Vec<crate::input::InputAction>,
+        ctx: &egui::Context,
+        fullscreen: bool,
+    ) {
+        for action in actions {
+            match action {
+                crate::input::InputAction::SendKey {
+                    scancode,
+                    extended,
+                    pressed,
+                } => {
+                    if pressed {
+                        match (scancode, extended) {
+                            (0x5B, true) => logging::event("Sent the Windows key"),
+                            (0x5C, true) => logging::event("Sent the right Windows key"),
+                            (0x5D, true) => logging::event("Sent the Menu key"),
+                            (0x37, true) => logging::event("Sent Print Screen"),
+                            _ => {}
+                        }
+                    }
+                    self.send(Command::Key {
+                        scancode,
+                        extended,
+                        pressed,
+                    });
+                }
+                crate::input::InputAction::Paste(text) => {
+                    if self.bookmark.share_clipboard {
+                        logging::event(format_args!(
+                            "Pasted into the PC: {} characters",
+                            text.chars().count()
+                        ));
+                        self.send(Command::Paste(ClipboardText::new(text)));
+                    } else {
+                        self.send(Command::Key {
+                            scancode: 0x2F,
+                            extended: false,
+                            pressed: true,
+                        });
+                    }
+                }
+                crate::input::InputAction::ToggleFullscreen => {
+                    if !fullscreen {
+                        self.fullscreen_hint_until = Some(Instant::now() + FULLSCREEN_HINT);
+                    }
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
+                    logging::event(if fullscreen {
+                        "Left full screen"
+                    } else {
+                        "Full screen"
+                    });
+                }
+            }
+        }
+    }
+
+    fn poll_wayland_keys(&mut self, ctx: &egui::Context, focused: bool, fullscreen: bool) {
+        let Some(rx) = &self.wayland_keys_rx else {
+            return;
+        };
+        let now = Instant::now();
+        let events: Vec<_> = rx.try_iter().collect();
+        for event in events {
+            match event {
+                crate::key_grab::WaylandKeyEvent::Key { evdev, pressed } => {
+                    if focused {
+                        if pressed && self.input_state.is_alt_held() {
+                            match evdev {
+                                15 => logging::event("Sent Alt+Tab"),
+                                62 => logging::event("Sent Alt+F4"),
+                                _ => {}
+                            }
+                        }
+                        let actions = self.input_state.handle_physical_key(evdev, pressed, now);
+                        self.execute_input_actions(actions, ctx, fullscreen);
+                    }
+                }
+                crate::key_grab::WaylandKeyEvent::Modifiers { caps, num } => {
+                    self.send(Command::LockKeys {
+                        caps,
+                        num,
+                        scroll: false,
+                    });
+                }
+                crate::key_grab::WaylandKeyEvent::Enter { keys } => {
+                    self.input_state.handle_enter(&keys);
+                }
+                crate::key_grab::WaylandKeyEvent::Leave => {
+                    let actions = self.input_state.handle_leave();
+                    self.execute_input_actions(actions, ctx, fullscreen);
+                }
+                crate::key_grab::WaylandKeyEvent::Repeat { evdev } => {
+                    if focused {
+                        let actions = self.input_state.handle_physical_key(evdev, true, now);
+                        self.execute_input_actions(actions, ctx, fullscreen);
+                    }
+                }
+            }
+        }
     }
 
     // ── Identity ────────────────────────────────────────────────────────
@@ -1357,15 +1473,30 @@ impl ActiveSession {
                     });
             });
         }
-        self.sync_modifiers(focus.map_or(Modifiers::NONE, |(modifiers, _)| modifiers));
-        if let Some(grab) = &self.key_grab {
-            grab.set_active(focus.is_some());
+        let has_wayland = self.key_grab.is_some();
+        if !has_wayland {
+            self.sync_modifiers(focus.map_or(Modifiers::NONE, |(modifiers, _)| modifiers));
         }
-        // The session lost the keyboard: their releases will never arrive.
+        // The session lost the keyboard: release all held keys.
         if focus.is_none() {
-            for key in std::mem::take(&mut self.keys_down) {
-                self.send_key(key, false);
+            if has_wayland {
+                let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                let actions = self.input_state.handle_leave();
+                self.execute_input_actions(actions, &ctx, fullscreen);
+            } else {
+                for key in std::mem::take(&mut self.fallback_keys_down) {
+                    self.send_key(key, false);
+                }
             }
+        }
+        if has_wayland {
+            let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+            self.input_state.set_fullscreen(fullscreen);
+            self.input_state
+                .set_share_clipboard(self.bookmark.share_clipboard);
+            self.poll_wayland_keys(&ctx, focus.is_some(), fullscreen);
+            let tick_actions = self.input_state.tick(Instant::now());
+            self.execute_input_actions(tick_actions, &ctx, fullscreen);
         }
         if let Some(text) = self.remote_copy.take() {
             // Only while the user works in the session: a PC copying on its
@@ -1551,6 +1682,7 @@ impl ActiveSession {
             remote_point(pos, image, region)
         };
 
+        let has_wayland = self.key_grab.is_some();
         let (events, modifiers) = ui.input(|i| (i.events.clone(), i.modifiers));
         for event in events {
             match event {
@@ -1599,7 +1731,7 @@ impl ActiveSession {
                     modifiers,
                     ..
                 } if focused && modifiers.ctrl && modifiers.alt => {
-                    if pressed {
+                    if !has_wayland && pressed {
                         if !fullscreen {
                             self.fullscreen_hint_until = Some(Instant::now() + FULLSCREEN_HINT);
                         }
@@ -1618,44 +1750,59 @@ impl ActiveSession {
                     repeat,
                     modifiers,
                 } if focused => {
-                    // Modifiers first: a key and its Ctrl can land in one frame.
-                    self.sync_modifiers(modifiers);
-                    // Reserved combinations only: what is typed is never logged.
-                    if pressed && !repeat && modifiers.alt {
-                        match physical_key.unwrap_or(key) {
-                            egui::Key::Tab => logging::event("Sent Alt+Tab"),
-                            egui::Key::F4 => logging::event("Sent Alt+F4"),
-                            _ => {}
+                    if !has_wayland {
+                        // Modifiers first: a key and its Ctrl can land in one frame.
+                        self.sync_modifiers(modifiers);
+                        // Reserved combinations only: what is typed is never logged.
+                        if pressed && !repeat && modifiers.alt {
+                            match physical_key.unwrap_or(key) {
+                                egui::Key::Tab => logging::event("Sent Alt+Tab"),
+                                egui::Key::F4 => logging::event("Sent Alt+F4"),
+                                _ => {}
+                            }
                         }
-                    }
-                    if let Some(code) = keymap::scancode(physical_key.unwrap_or(key)) {
-                        let strokes =
-                            strokes_for(&mut self.keys_down, code, pressed, modifiers.ctrl);
-                        for (key, down) in strokes {
-                            self.send_key(key, down);
+                        if let Some(code) = keymap::scancode(physical_key.unwrap_or(key)) {
+                            let strokes = strokes_for(
+                                &mut self.fallback_keys_down,
+                                code,
+                                pressed,
+                                modifiers.ctrl,
+                            );
+                            for (key, down) in strokes {
+                                self.send_key(key, down);
+                            }
                         }
                     }
                 }
                 // egui turns these shortcuts into clipboard commands and
                 // swallows the key press; the release still arrives as a key.
                 Event::Copy if focused => {
-                    self.keys_down.insert(keymap::C);
-                    self.send_key(keymap::C, true);
+                    if !has_wayland {
+                        self.fallback_keys_down.insert(keymap::C);
+                        self.send_key(keymap::C, true);
+                    }
                 }
                 Event::Cut if focused => {
-                    self.keys_down.insert(keymap::X);
-                    self.send_key(keymap::X, true);
+                    if !has_wayland {
+                        self.fallback_keys_down.insert(keymap::X);
+                        self.send_key(keymap::X, true);
+                    }
                 }
                 Event::Paste(text) if focused => {
-                    self.keys_down.insert(keymap::V);
-                    if self.bookmark.share_clipboard {
-                        logging::event(format_args!(
-                            "Pasted into the PC: {} characters",
-                            text.chars().count()
-                        ));
-                        self.send(Command::Paste(ClipboardText::new(text)));
+                    if has_wayland {
+                        let actions = self.input_state.handle_egui_paste(text, Instant::now());
+                        self.execute_input_actions(actions, &ctx, fullscreen);
                     } else {
-                        self.send_key(keymap::V, true);
+                        self.fallback_keys_down.insert(keymap::V);
+                        if self.bookmark.share_clipboard {
+                            logging::event(format_args!(
+                                "Pasted into the PC: {} characters",
+                                text.chars().count()
+                            ));
+                            self.send(Command::Paste(ClipboardText::new(text)));
+                        } else {
+                            self.send_key(keymap::V, true);
+                        }
                     }
                 }
                 _ => {}

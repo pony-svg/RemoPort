@@ -79,8 +79,11 @@ estructura. No forma parte de este plan.
    `actions/checkout@v4` a `v5` (aviso de Node 20 del primer CI).
 4. Dar a `ConnectConfig` un constructor con valores por defecto:
    `ConnectConfig::new(host, username, password, trust_store)`. Los cuatro
-   tests del motor que la construyen a mano pasan a usarlo. `src/session.rs`
-   también.
+   tests del motor que la construyen a mano pasan a usarlo, evitando el
+   acoplamiento de campos. La app (`src/session.rs`) mantiene la construcción
+   literal campo por campo: si el motor añade un campo nuevo, el compilador debe
+   obligar a la app a decidir su valor explícitamente y no pasar por alto
+   ajustes de seguridad en silencio.
 
 **Terminado cuando:** los cuatro comandos pasan, hay 120 tests o más, y añadir
 un campo de prueba a `ConnectConfig` ya no obliga a tocar ningún test (se
@@ -121,6 +124,27 @@ coincide, se revisa el diagnóstico antes de seguir.
   `egui::Event::Key` se ignoran. Sin Wayland, o si el listener falla, sigue el
   camino actual por egui y el log lo dice una vez.
 
+**Cinco puntos clave de diseño:**
+
+1. **Autorrepetición.** Wayland no envía repeticiones: las genera cada cliente
+   con `wl_keyboard.repeat_info` (tasa y retardo, desde la versión 4 de
+   `wl_keyboard`). Hoy las da egui. Si la fuente pasa a ser el listener, la
+   repetición se pierde, salvo que la generes tú. Si el teclado no anuncia
+   `repeat_info`, usa un valor por defecto razonable y dilo en el log una vez.
+   Al soltar la tecla, la repetición se detiene de inmediato: ni una pulsación más.
+2. **Teclas de bloqueo.** Bloq Mayús, Bloq Num y Bloq Despl (evdev 58, 69 y 70)
+   no se envían como teclas. Ya se sincronizan con `Command::LockKeys` desde
+   `wl_keyboard.modifiers`; si se enviaran además, el PC las cambiaría dos veces.
+3. **Modificadores.** Con la fuente física, Shift, Ctrl y Alt, izquierdos y
+   derechos, salen de ella. `sync_modifiers` no puede seguir enviando en ese
+   modo, o llegarían duplicados.
+4. **Tecla Windows y Menú.** Hoy solo van al PC en pantalla completa; en ventana
+   son del escritorio. Eso se mantiene.
+5. **Despertar a la interfaz.** El hilo del listener avisa con un callback
+   (`Box<dyn Fn() + Send + Sync>` que llama a `request_repaint`), creado fuera
+   de `key_grab`. `key_grab` no recibe `egui::Context`; así la regla R3 se puede
+   cumplir en la fase 4.
+
 **Puntos delicados**
 
 - **Nunca dos fuentes a la vez.** Si ambas envían, cada tecla se escribe dos
@@ -137,12 +161,21 @@ coincide, se revisa el diagnóstico antes de seguir.
 - **Nada de lo escrito va al log.** Solo combinaciones reservadas y recuentos,
   como ahora.
 
-**Tests nuevos:** tabla (por ejemplo `83 → 0x53`, `55 → 0x37`, `96 → E0 1C`,
-`98 → E0 35`, `100 → E0 38`), estado de teclas, regla del pegado, atajo propio,
-una sola fuente.
+**Tests nuevos:**
+- tabla completa: por ejemplo `83 → 0x53`, `55 → 0x37`, `96 → E0 1C`, `98 → E0 35`,
+  `100 → E0 38`, `97 → E0 1D`, `74 → 0x4A`, `78 → 0x4E`;
+- 58, 69 y 70 no producen tecla;
+- una sola fuente: con el listener activo, un `egui::Event::Key` no envía nada;
+- repetición: tecla mantenida repite según tasa y retardo, y al soltarla no
+  sale ni una repetición más;
+- regla del pegado y atajo propio Ctrl+Alt+Intro.
 
-**Terminado cuando:** los cuatro comandos pasan y `src/key_grab.rs` no nombra
-`Command` ni `Commander`.
+**Terminado cuando:** los cuatro comandos pasan con más de 120 tests,
+`src/key_grab.rs` no nombra `Command`, `Commander` ni `egui`, y el informe
+incluye la lista de prueba manual de la fase 1 del plan, con estos añadidos:
+- mantener Retroceso: borra seguido y para al soltar;
+- Bloq Mayús y Bloq Num aquí: el PC los sigue y no se desfasan;
+- tecla Windows en ventana: no llega al PC; en pantalla completa sí.
 
 **Prueba manual (el dueño)**
 
@@ -150,12 +183,16 @@ una sola fuente.
    Intro. En el Bloc de notas y en Excel.
 2. `@` con AltGr+Q y otros símbolos de AltGr.
 3. Mayúsculas, `ñ`, tildes.
-4. Copiar y pegar en los dos sentidos.
-5. Pantalla completa: tecla Windows, Alt+Tab, salir con Ctrl+Alt+Intro.
-6. Cambiar a otra ventana con una tecla pulsada y volver: no debe quedar
+4. Mantener pulsado Retroceso: borra seguido y para al soltar.
+5. Bloq Mayús y Bloq Num aquí: el PC los sigue y no se desfasan.
+6. Copiar y pegar en los dos sentidos.
+7. Tecla Windows y Menú: en ventana no llegan al PC (son del escritorio); en
+   pantalla completa sí van al PC.
+8. Pantalla completa: tecla Windows, Alt+Tab, salir con Ctrl+Alt+Intro.
+9. Cambiar a otra ventana con una tecla pulsada y volver: no debe quedar
    ninguna tecla atascada en el PC.
-7. Abrir Editar PC o escribir en el formulario de acceso: nada de eso debe
-   llegar al PC.
+10. Abrir Editar PC o escribir en el formulario de acceso: nada de eso debe
+    llegar al PC.
 
 **Riesgo:** medio. Es la única fase que cambia el comportamiento.
 

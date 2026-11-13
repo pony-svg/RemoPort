@@ -35,7 +35,6 @@ pub enum WaylandKeyEvent {
     /// Window lost keyboard focus.
     Leave,
     /// Autorepeat event for the active key.
-    #[allow(dead_code)]
     Repeat { evdev: u32 },
 }
 
@@ -141,6 +140,7 @@ struct State {
     shared: Shared,
     keyboard: Option<WlKeyboard>,
     locks: Option<(bool, bool)>,
+    repeat: crate::input::RepeatTracker,
 }
 
 fn run(
@@ -182,6 +182,7 @@ fn run(
         shared,
         keyboard: None,
         locks: None,
+        repeat: crate::input::RepeatTracker::new(),
     };
 
     while !stop.load(Ordering::Relaxed) {
@@ -197,13 +198,30 @@ fn run(
         queue
             .dispatch_pending(&mut state)
             .map_err(|e| e.to_string())?;
+
+        let now = std::time::Instant::now();
+        if let Some(evdev) = state.repeat.tick(now) {
+            if state.repeat.take_default_log_needed() {
+                logging::event(
+                    "Keyboard repeat info not announced by desktop: using default 500ms delay, 25Hz rate",
+                );
+            }
+            let _ = state.sender.send(WaylandKeyEvent::Repeat { evdev });
+            (state.wakeup)();
+        }
+
         let _ = connection.flush();
         let Some(guard) = queue.prepare_read() else {
             continue;
         };
+        let timeout = state.repeat.poll_timeout(
+            std::time::Instant::now(),
+            std::time::Duration::from_millis(50),
+        );
+        let timeout_ms = u16::try_from(timeout.as_millis()).unwrap_or(50);
         let readable = {
             let mut fds = [PollFd::new(guard.connection_fd(), PollFlags::POLLIN)];
-            poll(&mut fds, PollTimeout::from(50u8)).is_ok_and(|ready| ready > 0)
+            poll(&mut fds, PollTimeout::from(timeout_ms)).is_ok_and(|ready| ready > 0)
         };
         if readable {
             guard.read().map_err(|e| e.to_string())?;
@@ -280,11 +298,20 @@ impl Dispatch<WlKeyboard, ()> for State {
                 ..
             } => {
                 let pressed = key_state == wl_keyboard::KeyState::Pressed;
+                let now = std::time::Instant::now();
+                if pressed {
+                    state.repeat.press(key, now);
+                } else {
+                    state.repeat.release(key);
+                }
                 let _ = state.sender.send(WaylandKeyEvent::Key {
                     evdev: key,
                     pressed,
                 });
                 (state.wakeup)();
+            }
+            wl_keyboard::Event::RepeatInfo { rate, delay } => {
+                state.repeat.set_repeat_info(rate, delay);
             }
             wl_keyboard::Event::Modifiers { mods_locked, .. } => {
                 let locks = lock_keys(mods_locked);
@@ -301,6 +328,7 @@ impl Dispatch<WlKeyboard, ()> for State {
                 }
             }
             wl_keyboard::Event::Enter { keys, .. } => {
+                state.repeat.clear();
                 let keys = keys
                     .as_chunks::<4>()
                     .0
@@ -311,6 +339,7 @@ impl Dispatch<WlKeyboard, ()> for State {
                 (state.wakeup)();
             }
             wl_keyboard::Event::Leave { .. } => {
+                state.repeat.clear();
                 let _ = state.sender.send(WaylandKeyEvent::Leave);
                 (state.wakeup)();
             }

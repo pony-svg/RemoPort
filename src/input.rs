@@ -428,6 +428,129 @@ impl KeyState {
     }
 }
 
+/// Configured delay and interval for keyboard autorepeat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepeatConfig {
+    pub delay: Duration,
+    pub interval: Duration,
+    pub enabled: bool,
+    pub custom: bool,
+}
+
+impl Default for RepeatConfig {
+    fn default() -> Self {
+        Self {
+            delay: Duration::from_millis(500),
+            interval: Duration::from_millis(40), // 25 Hz
+            enabled: true,
+            custom: false,
+        }
+    }
+}
+
+/// Tracks keyboard autorepeat timing for physical keys.
+#[derive(Debug)]
+pub struct RepeatTracker {
+    config: RepeatConfig,
+    active: Option<(u32, Instant)>,
+    default_log_needed: bool,
+}
+
+impl Default for RepeatTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RepeatTracker {
+    /// Creates a new repeat tracker with default delay (500 ms) and interval (40 ms / 25 Hz).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            config: RepeatConfig::default(),
+            active: None,
+            default_log_needed: false,
+        }
+    }
+
+    /// Updates autorepeat configuration from compositor `wl_keyboard.repeat_info`.
+    /// `rate`: characters per second; `delay`: milliseconds before repetition starts.
+    pub fn set_repeat_info(&mut self, rate: i32, delay: i32) {
+        if rate > 0 && delay > 0 {
+            let interval_ms = (1000 / rate as u64).max(1);
+            self.config = RepeatConfig {
+                delay: Duration::from_millis(delay as u64),
+                interval: Duration::from_millis(interval_ms),
+                enabled: true,
+                custom: true,
+            };
+        } else {
+            self.config.enabled = false;
+            self.config.custom = true;
+            self.active = None;
+        }
+    }
+
+    /// Key pressed. If repeat is enabled, schedules the first repeat after `delay`.
+    pub fn press(&mut self, evdev: u32, now: Instant) {
+        if !self.config.enabled {
+            self.active = None;
+            return;
+        }
+        if !self.config.custom {
+            self.default_log_needed = true;
+        }
+        self.active = Some((evdev, now + self.config.delay));
+    }
+
+    /// Key released. Stops autorepeat immediately if it was the repeating key.
+    pub fn release(&mut self, evdev: u32) {
+        if let Some((active_key, _)) = self.active {
+            if active_key == evdev {
+                self.active = None;
+            }
+        }
+    }
+
+    /// Focus lost or leave event: stops autorepeat immediately.
+    pub fn clear(&mut self) {
+        self.active = None;
+    }
+
+    /// Checks if a repeat event is due at `now`. If so, advances next repeat by `interval` and returns `Some(evdev)`.
+    pub fn tick(&mut self, now: Instant) -> Option<u32> {
+        let (evdev, next_time) = self.active?;
+        if now >= next_time {
+            self.active = Some((evdev, now + self.config.interval));
+            Some(evdev)
+        } else {
+            None
+        }
+    }
+
+    /// Calculates the maximum duration to wait in poll before the next repeat event (or `default_timeout`).
+    #[must_use]
+    pub fn poll_timeout(&self, now: Instant, default_timeout: Duration) -> Duration {
+        match self.active {
+            Some((_, next_time)) => {
+                if now >= next_time {
+                    Duration::ZERO
+                } else {
+                    (next_time - now).min(default_timeout)
+                }
+            }
+            None => default_timeout,
+        }
+    }
+
+    /// True if default configuration was used because compositor did not announce repeat info (emitted once).
+    pub fn take_default_log_needed(&mut self) -> bool {
+        let needed = self.default_log_needed;
+        self.default_log_needed = false;
+        needed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,5 +797,102 @@ mod tests {
             paste_actions,
             vec![InputAction::Paste("sample".to_string())]
         );
+    }
+
+    #[test]
+    fn repeat_default_delay_and_rate() {
+        let mut tracker = RepeatTracker::new();
+        let t0 = Instant::now();
+
+        // Backspace (evdev 14) pressed at t0
+        tracker.press(14, t0);
+        assert!(tracker.take_default_log_needed());
+
+        // Before 500 ms: no repeat
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(490)), None);
+
+        // At 500 ms: first repeat fires
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(500)), Some(14));
+
+        // Before +40 ms: no repeat
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(530)), None);
+
+        // At +40 ms (540 ms): next repeat fires
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(540)), Some(14));
+
+        // At +80 ms (580 ms): next repeat fires
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(580)), Some(14));
+    }
+
+    #[test]
+    fn repeat_stops_immediately_on_release() {
+        let mut tracker = RepeatTracker::new();
+        let t0 = Instant::now();
+
+        tracker.press(14, t0);
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(500)), Some(14));
+
+        // Release at 510 ms
+        tracker.release(14);
+
+        // At 540 ms: nothing must fire
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(540)), None);
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(580)), None);
+    }
+
+    #[test]
+    fn repeat_stops_on_leave_or_clear() {
+        let mut tracker = RepeatTracker::new();
+        let t0 = Instant::now();
+
+        tracker.press(14, t0);
+        tracker.clear();
+
+        // At 500 ms: nothing fires
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(500)), None);
+    }
+
+    #[test]
+    fn repeat_custom_rate_and_delay() {
+        let mut tracker = RepeatTracker::new();
+        let t0 = Instant::now();
+
+        // 10 chars/sec = 100 ms interval, 300 ms initial delay
+        tracker.set_repeat_info(10, 300);
+        assert!(!tracker.take_default_log_needed()); // custom info provided
+
+        tracker.press(14, t0);
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(290)), None);
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(300)), Some(14));
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(350)), None);
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(400)), Some(14));
+    }
+
+    #[test]
+    fn repeat_disabled_when_rate_non_positive() {
+        let mut tracker = RepeatTracker::new();
+        let t0 = Instant::now();
+
+        tracker.set_repeat_info(0, 500);
+        tracker.press(14, t0);
+
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(1000)), None);
+    }
+
+    #[test]
+    fn poll_timeout_respects_next_repeat_time() {
+        let mut tracker = RepeatTracker::new();
+        let t0 = Instant::now();
+
+        tracker.press(14, t0);
+        // At t0 + 480ms, next repeat is in 20ms: poll timeout capped to 20ms
+        let timeout =
+            tracker.poll_timeout(t0 + Duration::from_millis(480), Duration::from_millis(50));
+        assert_eq!(timeout, Duration::from_millis(20));
+
+        // When overdue: Duration::ZERO
+        let timeout =
+            tracker.poll_timeout(t0 + Duration::from_millis(505), Duration::from_millis(50));
+        assert_eq!(timeout, Duration::ZERO);
     }
 }

@@ -1,4 +1,3 @@
-use crate::credentials;
 use crate::dialogs::{AddEditPcDialog, AddWorkspaceDialog};
 use crate::domain::{
     AppStateData, Appearance, DeviceBookmark, NavTab, RemoteAppItem, ResolutionOption, SortOption,
@@ -8,6 +7,7 @@ use crate::fonts;
 use crate::i18n::{resolution_label, t, tf};
 use crate::icons::{self, Icon};
 use crate::logging;
+use crate::ports::PlatformPorts;
 use crate::session::ActiveSession;
 use crate::store::{self, secure_config_dir, state_path, trust_store_path};
 use crate::theme::Theme;
@@ -54,11 +54,13 @@ pub struct RemoportApp {
     theme_applied: bool,
     /// The state as last written to disk, to save only what changed.
     last_saved: String,
+    /// Platform services wired by the binary crate.
+    ports: PlatformPorts,
 }
 
 impl RemoportApp {
     /// Starts with the state saved by the previous run.
-    pub fn load() -> Self {
+    pub fn load(ports: PlatformPorts) -> Self {
         if let Err(err) = secure_config_dir() {
             logging::event(format_args!(
                 "Could not make the configuration folder private: {err}"
@@ -87,6 +89,7 @@ impl RemoportApp {
             pending_delete: None,
             theme_applied: false,
             last_saved,
+            ports,
         }
     }
 
@@ -797,7 +800,7 @@ impl RemoportApp {
         if (entered || clicked) && !host.is_empty() {
             logging::event(format_args!("Quick connect to {host}"));
             let pc = DeviceBookmark::new(host.clone(), host, String::new());
-            self.active_session = Some(ActiveSession::new(pc, false));
+            self.active_session = Some(ActiveSession::new(pc, false, self.ports.clone()));
         }
     }
 
@@ -1112,7 +1115,7 @@ impl RemoportApp {
                 ));
                 self.state.bookmarks.retain(|b| b.id != pc.id);
                 // Its remembered password, if any, goes with it.
-                let _ = credentials::forget(pc.id);
+                let _ = self.ports.secrets.forget(pc.id);
                 self.pending_delete = None;
             }
             Some(false) => {
@@ -1216,7 +1219,7 @@ impl RemoportApp {
         if let Some(pos) = self.state.bookmarks.iter().position(|b| b.id == pc.id) {
             self.state.bookmarks[pos] = updated_pc.clone();
         }
-        self.active_session = Some(ActiveSession::new(updated_pc, true));
+        self.active_session = Some(ActiveSession::new(updated_pc, true, self.ports.clone()));
     }
 
     // ── Apps ────────────────────────────────────────────────────────────
@@ -1367,6 +1370,7 @@ impl RemoportApp {
         let mut session = ActiveSession::new(
             DeviceBookmark::new(app.workspace_name.clone(), app.name.clone(), String::new()),
             false,
+            self.ports.clone(),
         );
         session.open_app = Some(app.name.clone());
         self.active_session = Some(session);

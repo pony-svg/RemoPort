@@ -4,38 +4,40 @@
 //! the log.
 //!
 //! A keyring call can block while the keyring asks to be unlocked, so each one
-//! runs on its own thread and reports back through [`Pending`].
+//! runs on its own thread and reports back through [`PendingSecret`].
 
 use std::sync::mpsc;
 
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::ports::{PendingSecret, SecretOutcome, SecretStore};
+
 const SERVICE: &str = "app.remoport.Remoport";
 
-pub enum Outcome {
-    Found(Zeroizing<String>),
-    Missing,
-    Saved,
-    Forgotten,
-    Failed(String),
-}
+/// System keyring adapter backed by Secret Service (`keyring` crate).
+pub struct SystemKeyring;
 
-/// A keyring call in progress.
-pub struct Pending(mpsc::Receiver<Outcome>);
+impl SecretStore for SystemKeyring {
+    fn lookup(&self, pc: Uuid) -> PendingSecret {
+        lookup(pc)
+    }
 
-impl Pending {
-    pub fn poll(&self) -> Option<Outcome> {
-        self.0.try_recv().ok()
+    fn save(&self, pc: Uuid, password: Zeroizing<String>) -> PendingSecret {
+        save(pc, password)
+    }
+
+    fn forget(&self, pc: Uuid) -> PendingSecret {
+        forget(pc)
     }
 }
 
-fn run(job: impl FnOnce() -> Outcome + Send + 'static) -> Pending {
+fn run(job: impl FnOnce() -> SecretOutcome + Send + 'static) -> PendingSecret {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(job());
     });
-    Pending(rx)
+    PendingSecret::new(rx)
 }
 
 fn entry(pc: Uuid) -> keyring::Result<keyring::Entry> {
@@ -43,30 +45,30 @@ fn entry(pc: Uuid) -> keyring::Result<keyring::Entry> {
 }
 
 /// The password remembered for `pc`, if any.
-pub fn lookup(pc: Uuid) -> Pending {
+pub fn lookup(pc: Uuid) -> PendingSecret {
     run(move || match entry(pc).and_then(|e| e.get_password()) {
-        Ok(password) => Outcome::Found(Zeroizing::new(password)),
-        Err(keyring::Error::NoEntry) => Outcome::Missing,
-        Err(e) => Outcome::Failed(e.to_string()),
+        Ok(password) => SecretOutcome::Found(Zeroizing::new(password)),
+        Err(keyring::Error::NoEntry) => SecretOutcome::Missing,
+        Err(e) => SecretOutcome::Failed(e.to_string()),
     })
 }
 
 /// Remembers `password` for `pc`, replacing any earlier one.
-pub fn save(pc: Uuid, password: Zeroizing<String>) -> Pending {
+pub fn save(pc: Uuid, password: Zeroizing<String>) -> PendingSecret {
     run(
         move || match entry(pc).and_then(|e| e.set_password(&password)) {
-            Ok(()) => Outcome::Saved,
-            Err(e) => Outcome::Failed(e.to_string()),
+            Ok(()) => SecretOutcome::Saved,
+            Err(e) => SecretOutcome::Failed(e.to_string()),
         },
     )
 }
 
 /// Forgets the password remembered for `pc`; nothing remembered is fine.
-pub fn forget(pc: Uuid) -> Pending {
+pub fn forget(pc: Uuid) -> PendingSecret {
     run(
         move || match entry(pc).and_then(|e| e.delete_credential()) {
-            Ok(()) | Err(keyring::Error::NoEntry) => Outcome::Forgotten,
-            Err(e) => Outcome::Failed(e.to_string()),
+            Ok(()) | Err(keyring::Error::NoEntry) => SecretOutcome::Forgotten,
+            Err(e) => SecretOutcome::Failed(e.to_string()),
         },
     )
 }

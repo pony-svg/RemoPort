@@ -4885,6 +4885,7 @@ dependencies = [
  "cpal",
  "eframe",
  "egui",
+ "emath",
  "image",
  "keyring",
  "nix 0.29.0",

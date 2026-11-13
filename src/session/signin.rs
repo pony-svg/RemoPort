@@ -5,12 +5,14 @@
 //!
 //! This module contains pure credential logic and does not depend on UI (R3).
 
+use std::sync::Arc;
+
 use zeroize::{Zeroize, Zeroizing};
 
 use remoport_rdp::ResumeCookie;
 
-use crate::credentials::{self, Outcome, Pending};
 use crate::logging;
+use crate::ports::{PendingSecret, SecretOutcome, SecretStore};
 
 /// What the keyring reported when polled.
 #[derive(Debug, PartialEq, Eq)]
@@ -43,7 +45,7 @@ pub struct SignInState {
     /// Whether the last connection attempt used `saved_password`.
     pub used_saved_password: bool,
     /// Ongoing background keyring lookup/save/forget operation.
-    pub keyring: Option<Pending>,
+    pub keyring: Option<PendingSecret>,
     /// Password to remember in the keyring once connection succeeds.
     pub to_remember: Option<Zeroizing<String>>,
     /// Error from a failed sign-in attempt.
@@ -56,13 +58,20 @@ pub struct SignInState {
     pub session_gateway_password: Option<Zeroizing<String>>,
     /// Session cookie provided by the PC to resume a dropped connection.
     pub resume: Option<ResumeCookie>,
+    /// Persistent store used for saved passwords.
+    store: Arc<dyn SecretStore>,
 }
 
 impl SignInState {
     /// Creates a new sign-in state for a PC.
     #[must_use]
-    pub fn new(username: String, saved: bool, bookmark_id: uuid::Uuid) -> Self {
-        let keyring = saved.then(|| credentials::lookup(bookmark_id));
+    pub fn new(
+        username: String,
+        saved: bool,
+        bookmark_id: uuid::Uuid,
+        store: Arc<dyn SecretStore>,
+    ) -> Self {
+        let keyring = saved.then(|| store.lookup(bookmark_id));
         Self {
             username,
             password: Zeroizing::new(String::new()),
@@ -76,33 +85,34 @@ impl SignInState {
             gateway_password: Zeroizing::new(String::new()),
             session_gateway_password: None,
             resume: None,
+            store,
         }
     }
 
     /// Polls the pending keyring operation, updating state and returning any user-facing event.
     pub fn poll_keyring(&mut self, pc_name: &str) -> Option<KeyringEvent> {
-        let outcome = self.keyring.as_ref().and_then(Pending::poll)?;
+        let outcome = self.keyring.as_ref().and_then(PendingSecret::poll)?;
         self.keyring = None;
         match outcome {
-            Outcome::Found(password) => {
+            SecretOutcome::Found(password) => {
                 logging::event(format_args!(
                     "A password for {pc_name} is saved in the keyring"
                 ));
                 self.saved_password = Some(password);
                 Some(KeyringEvent::Found)
             }
-            Outcome::Missing => None,
-            Outcome::Saved => {
+            SecretOutcome::Missing => None,
+            SecretOutcome::Saved => {
                 logging::event(format_args!(
                     "Password for {pc_name} remembered in the keyring"
                 ));
                 Some(KeyringEvent::Saved)
             }
-            Outcome::Forgotten => {
+            SecretOutcome::Forgotten => {
                 logging::event(format_args!("Saved password for {pc_name} forgotten"));
                 None
             }
-            Outcome::Failed(error) => {
+            SecretOutcome::Failed(error) => {
                 logging::event(format_args!("Keyring unavailable: {error}"));
                 Some(KeyringEvent::Failed(error))
             }
@@ -112,7 +122,7 @@ impl SignInState {
     /// Forgets the saved password for this PC.
     pub fn forget_saved(&mut self, bookmark_id: uuid::Uuid) {
         self.saved_password = None;
-        self.keyring = Some(credentials::forget(bookmark_id));
+        self.keyring = Some(self.store.forget(bookmark_id));
     }
 
     /// Prepares passwords for connecting: extracts effective passwords, caches them for
@@ -153,7 +163,7 @@ impl SignInState {
     /// Called when the session successfully connects: saves the password in keyring if requested.
     pub fn on_connected(&mut self, bookmark_id: uuid::Uuid) {
         if let Some(password) = self.to_remember.take() {
-            self.keyring = Some(credentials::save(bookmark_id, password));
+            self.keyring = Some(self.store.save(bookmark_id, password));
         }
     }
 
@@ -181,12 +191,17 @@ impl SignInState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::NoopSecretStore;
     use uuid::Uuid;
+
+    fn test_store() -> Arc<dyn SecretStore> {
+        Arc::new(NoopSecretStore)
+    }
 
     #[test]
     fn signin_state_new_initialization() {
         let id = Uuid::new_v4();
-        let state = SignInState::new("alice".into(), false, id);
+        let state = SignInState::new("alice".into(), false, id, test_store());
         assert_eq!(state.username, "alice");
         assert!(state.password.is_empty());
         assert!(!state.remember);
@@ -202,7 +217,7 @@ mod tests {
     #[test]
     fn prepare_connect_with_typed_password_wipes_input_and_caches_session() {
         let id = Uuid::new_v4();
-        let mut state = SignInState::new("alice".into(), true, id);
+        let mut state = SignInState::new("alice".into(), true, id, test_store());
         state.password = Zeroizing::new("secret123".into());
         state.remember = true;
 
@@ -224,7 +239,7 @@ mod tests {
     #[test]
     fn prepare_connect_with_saved_password() {
         let id = Uuid::new_v4();
-        let mut state = SignInState::new("alice".into(), true, id);
+        let mut state = SignInState::new("alice".into(), true, id, test_store());
         state.saved_password = Some(Zeroizing::new("saved_pass".into()));
 
         let (pass, _) = state.prepare_connect(true, false);
@@ -236,7 +251,7 @@ mod tests {
     #[test]
     fn forget_session_wipes_passwords_and_resume() {
         let id = Uuid::new_v4();
-        let mut state = SignInState::new("alice".into(), false, id);
+        let mut state = SignInState::new("alice".into(), false, id, test_store());
         state.session_password = Some(Zeroizing::new("p1".into()));
         state.session_gateway_password = Some(Zeroizing::new("p2".into()));
 
@@ -249,7 +264,7 @@ mod tests {
     #[test]
     fn on_auth_failed_clears_saved_password_if_used() {
         let id = Uuid::new_v4();
-        let mut state = SignInState::new("alice".into(), true, id);
+        let mut state = SignInState::new("alice".into(), true, id, test_store());
         state.saved_password = Some(Zeroizing::new("saved".into()));
         state.prepare_connect(true, false);
         assert!(state.used_saved_password);

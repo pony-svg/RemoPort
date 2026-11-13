@@ -6,15 +6,15 @@
 
 use crate::domain::{AudioPlaybackMode, DeviceBookmark};
 use crate::i18n::t;
-use crate::key_grab::KeyGrab;
 use crate::keymap;
 use crate::logging;
+use crate::ports::{PhysicalKeyEvent, PhysicalKeyboard, PlatformPorts};
 use crate::store;
 use crate::theme::Theme;
 use egui::{Context, Modifiers, Ui};
 use remoport_rdp::{
     ClipboardText, Command, ConnectConfig, Error, Event as EngineEvent, IdentityProblem,
-    Rect as RemoteRect, SharedFolder, SoundInput, SoundOutput, TrustStore,
+    Rect as RemoteRect, SharedFolder, TrustStore,
 };
 use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
@@ -44,11 +44,11 @@ struct SessionInput {
     modifiers: Modifiers,
     last_pointer: Option<(u16, u16)>,
     /// The desktop's reserved keys, held back while in full screen.
-    key_grab: Option<KeyGrab>,
+    key_grab: Option<Box<dyn PhysicalKeyboard>>,
     /// Asked for this stretch of full screen, whether it could be had or not.
     key_grab_tried: bool,
-    /// Events from the physical Wayland keyboard listener.
-    wayland_keys_rx: Option<std::sync::mpsc::Receiver<crate::key_grab::WaylandKeyEvent>>,
+    /// Events from the physical keyboard listener.
+    wayland_keys_rx: Option<std::sync::mpsc::Receiver<PhysicalKeyEvent>>,
     /// State machine tracking physical and fallback keys.
     state: crate::input::KeyState,
     /// Keys pressed via egui fallback when Wayland is not available.
@@ -107,6 +107,7 @@ pub struct ActiveSession {
     pub open_app: Option<String>,
     /// Whether the PC is saved, so its password may be remembered.
     saved: bool,
+    ports: PlatformPorts,
     pub controller: SessionController,
     pub signin: SignInState,
     pub display: DisplayState,
@@ -119,14 +120,20 @@ pub struct ActiveSession {
 impl ActiveSession {
     /// A session for `bookmark`; `saved` tells whether it is one of the
     /// user's PCs (whose password may be remembered) or a one-off.
-    pub fn new(bookmark: DeviceBookmark, saved: bool) -> Self {
+    pub fn new(bookmark: DeviceBookmark, saved: bool, ports: PlatformPorts) -> Self {
         let screens = usize::from(bookmark.screens.clamp(1, 4));
         let share_clipboard = bookmark.share_clipboard;
-        let signin = SignInState::new(bookmark.username.clone(), saved, bookmark.id);
+        let signin = SignInState::new(
+            bookmark.username.clone(),
+            saved,
+            bookmark.id,
+            Arc::clone(&ports.secrets),
+        );
         Self {
             bookmark,
             open_app: None,
             saved,
+            ports,
             controller: SessionController::new(),
             signin,
             display: DisplayState::new(screens),
@@ -229,11 +236,11 @@ impl ActiveSession {
         }
 
         let sound = (self.bookmark.audio_playback == AudioPlaybackMode::LocalDevice)
-            .then(|| Box::new(crate::audio::Speaker::new()) as Box<dyn SoundOutput>);
+            .then(|| self.ports.audio.sound_output());
         let microphone = self.bookmark.redirect_microphones.then(|| {
-            Box::new(crate::audio::Microphone::new(Arc::clone(
-                &self.media.microphone_muted,
-            ))) as Box<dyn SoundInput>
+            self.ports
+                .audio
+                .sound_input(Arc::clone(&self.media.microphone_muted))
         });
         let folders: Vec<SharedFolder> = self
             .bookmark
@@ -618,7 +625,7 @@ impl ActiveSession {
         let events: Vec<_> = rx.try_iter().collect();
         for event in events {
             match event {
-                crate::key_grab::WaylandKeyEvent::Key { evdev, pressed } => {
+                PhysicalKeyEvent::Key { evdev, pressed } => {
                     if focused {
                         if pressed && self.input.state.is_alt_held() {
                             match evdev {
@@ -631,21 +638,21 @@ impl ActiveSession {
                         self.execute_input_actions(actions, ctx, fullscreen);
                     }
                 }
-                crate::key_grab::WaylandKeyEvent::Modifiers { caps, num } => {
+                PhysicalKeyEvent::Modifiers { caps, num } => {
                     self.send(Command::LockKeys {
                         caps,
                         num,
                         scroll: false,
                     });
                 }
-                crate::key_grab::WaylandKeyEvent::Enter { keys } => {
+                PhysicalKeyEvent::Enter { keys } => {
                     self.input.state.handle_enter(&keys);
                 }
-                crate::key_grab::WaylandKeyEvent::Leave => {
+                PhysicalKeyEvent::Leave => {
                     let actions = self.input.state.handle_leave();
                     self.execute_input_actions(actions, ctx, fullscreen);
                 }
-                crate::key_grab::WaylandKeyEvent::Repeat { evdev } => {
+                PhysicalKeyEvent::Repeat { evdev } => {
                     if focused {
                         let actions = self.input.state.handle_physical_key(evdev, true, now);
                         self.execute_input_actions(actions, ctx, fullscreen);
@@ -856,7 +863,7 @@ mod tests {
     fn a_scale_set_for_the_pc_wins_over_this_screens() {
         let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         pc.scale_percent = Some(200);
-        let mut view = ActiveSession::new(pc, false);
+        let mut view = ActiveSession::new(pc, false, PlatformPorts::disabled());
         view.display.screen_scale = 125;
         assert_eq!(view.wanted_scale(), 200);
         view.bookmark.scale_percent = None;
@@ -867,7 +874,7 @@ mod tests {
     fn automatic_scale_stays_at_100_when_this_computer_enlarges_the_picture() {
         let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         pc.hidpi_full_resolution = false;
-        let mut view = ActiveSession::new(pc, false);
+        let mut view = ActiveSession::new(pc, false, PlatformPorts::disabled());
         view.display.screen_scale = 125;
         assert_eq!(view.wanted_scale(), 100);
         view.bookmark.scale_percent = Some(150);
@@ -878,7 +885,7 @@ mod tests {
     fn a_fixed_resolution_ignores_the_window() {
         let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         pc.resolution = crate::domain::ResolutionOption::Fhd1080p;
-        let mut view = ActiveSession::new(pc, false);
+        let mut view = ActiveSession::new(pc, false, PlatformPorts::disabled());
         view.display.display_control = true;
         view.screen.resize(1920, 1080);
         view.display.canvas_px = (800, 600);
@@ -901,7 +908,7 @@ mod tests {
     fn a_pc_that_answers_another_size_is_not_asked_again() {
         let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         pc.resolution = crate::domain::ResolutionOption::Fhd1080p;
-        let mut view = ActiveSession::new(pc, false);
+        let mut view = ActiveSession::new(pc, false, PlatformPorts::disabled());
         view.display.display_control = true;
         view.display.requested_size = Some((1920, 1080));
 
@@ -922,7 +929,7 @@ mod tests {
     #[test]
     fn a_new_scale_alone_is_asked_of_the_pc() {
         let pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
-        let mut view = ActiveSession::new(pc, false);
+        let mut view = ActiveSession::new(pc, false, PlatformPorts::disabled());
         view.display.display_control = true;
         view.screen.resize(1280, 720);
         view.display.canvas_px = (1280, 720);
@@ -943,7 +950,7 @@ mod tests {
     fn a_new_scale_alone_reaches_every_screen() {
         let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         pc.screens = 2;
-        let mut view = ActiveSession::new(pc, false);
+        let mut view = ActiveSession::new(pc, false, PlatformPorts::disabled());
         view.display.display_control = true;
         view.screen.resize(1280, 720);
         let sizes = vec![(640, 720), (640, 720)];
@@ -963,7 +970,7 @@ mod tests {
     #[test]
     fn a_dropped_session_comes_back_until_it_cannot() {
         let pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
-        let mut view = ActiveSession::new(pc, false);
+        let mut view = ActiveSession::new(pc, false, PlatformPorts::disabled());
         view.controller.phase = Phase::Connected;
         view.signin.session_password = Some(Zeroizing::new("secret".into()));
 
@@ -996,7 +1003,7 @@ mod tests {
     #[test]
     fn a_refused_password_while_reconnecting_asks_again_and_wipes_it() {
         let pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
-        let mut view = ActiveSession::new(pc, false);
+        let mut view = ActiveSession::new(pc, false, PlatformPorts::disabled());
         view.controller.phase = Phase::Reconnecting {
             attempt: 3,
             at: None,

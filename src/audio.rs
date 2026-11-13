@@ -16,6 +16,20 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use remoport_rdp::{MicrophonePackets, SoundInput, SoundOutput};
 
 use crate::logging;
+use crate::ports::AudioFactory;
+
+/// Platform audio adapter using `cpal`.
+pub struct CpalAudioFactory;
+
+impl AudioFactory for CpalAudioFactory {
+    fn sound_output(&self) -> Box<dyn SoundOutput> {
+        Box::new(Speaker::new())
+    }
+
+    fn sound_input(&self, muted: Arc<AtomicBool>) -> Box<dyn SoundInput> {
+        Box::new(Microphone::new(muted))
+    }
+}
 
 /// The most sound held back, in seconds: anything older is dropped rather
 /// than letting the sound fall behind the picture.

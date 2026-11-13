@@ -7,8 +7,7 @@
 
 use egui::Key;
 
-/// A scancode and whether it carries the E0 (extended) prefix.
-pub type Scancode = (u8, bool);
+pub use crate::input::Scancode;
 
 pub const SHIFT: Scancode = (0x2A, false);
 pub const CTRL: Scancode = (0x1D, false);

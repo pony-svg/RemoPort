@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use egui::{pos2, Pos2, Rect, Vec2};
+use emath::{pos2, Pos2, Rect, Vec2};
 use remoport_rdp::{Command, Rect as RemoteRect};
 
 use crate::domain::ResolutionOption;
@@ -351,7 +351,7 @@ pub fn to_u16(value: f32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui::vec2;
+    use emath::vec2;
 
     #[test]
     fn desktop_sizes_are_even_and_within_limits() {

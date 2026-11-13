@@ -7,7 +7,8 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use crate::keymap::Scancode;
+/// A scancode and whether it carries the E0 (extended) prefix.
+pub type Scancode = (u8, bool);
 
 /// Time window to correlate physical V press with an egui Paste event.
 /// 150 ms is imperceptible to users typing but comfortably absorbs UI frame latency.

@@ -10,14 +10,18 @@ pub mod input;
 mod key_grab;
 mod keymap;
 mod logging;
+mod ports;
 mod session;
 mod store;
 mod theme;
 
 use app::RemoportApp;
 use eframe::egui;
+use ports::PlatformPorts;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Application ID: names the desktop entry, icon and metainfo, and lets
 /// Wayland compositors match the window to them.
@@ -32,8 +36,13 @@ struct AppRunner {
 
 impl AppRunner {
     pub fn new(screenshot_path: Option<PathBuf>) -> Self {
+        let ports = PlatformPorts {
+            secrets: Arc::new(credentials::SystemKeyring),
+            keys: Arc::new(key_grab::WaylandKeySource),
+            audio: Arc::new(audio::CpalAudioFactory),
+        };
         Self {
-            app: RemoportApp::load(),
+            app: RemoportApp::load(ports),
             screenshot_path,
             frame_count: 0,
             screenshot_taken: false,
@@ -48,7 +57,9 @@ impl eframe::App for AppRunner {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        key_grab::remember_window(frame);
+        let display = frame.display_handle().ok().map(|h| h.as_raw());
+        let window = frame.window_handle().ok().map(|h| h.as_raw());
+        key_grab::remember_window(display, window);
         // Draw the application
         self.app.update(ctx);
 

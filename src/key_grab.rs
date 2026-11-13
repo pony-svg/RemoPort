@@ -8,7 +8,7 @@ use std::sync::{mpsc, Arc, OnceLock};
 use std::thread::JoinHandle;
 
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use wayland_backend::client::{Backend, ObjectId};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
@@ -22,21 +22,7 @@ use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::zwp_keyboard
 };
 
 use crate::logging;
-
-/// An event from the Wayland keyboard listener sent to the UI thread.
-#[derive(Debug, Clone)]
-pub enum WaylandKeyEvent {
-    /// Physical key pressed or released by evdev keycode.
-    Key { evdev: u32, pressed: bool },
-    /// Caps Lock and Num Lock states changed.
-    Modifiers { caps: bool, num: bool },
-    /// Window gained keyboard focus, with keys already held down.
-    Enter { keys: Vec<u32> },
-    /// Window lost keyboard focus.
-    Leave,
-    /// Autorepeat event for the active key.
-    Repeat { evdev: u32 },
-}
+use crate::ports::{KeySource, PhysicalKeyEvent, PhysicalKeyboard};
 
 /// The main window's Wayland display and surface, as addresses.
 #[derive(Clone, Copy)]
@@ -49,20 +35,29 @@ static WINDOW: OnceLock<Option<WindowPointers>> = OnceLock::new();
 
 /// Notes the main window's handles, the first time it is drawn. Nothing is
 /// noted on X11.
-pub fn remember_window(frame: &eframe::Frame) {
-    WINDOW.get_or_init(|| {
-        let display = frame.display_handle().ok()?.as_raw();
-        let window = frame.window_handle().ok()?.as_raw();
-        match (display, window) {
-            (RawDisplayHandle::Wayland(display), RawWindowHandle::Wayland(window)) => {
-                Some(WindowPointers {
-                    display: display.display.as_ptr() as usize,
-                    surface: window.surface.as_ptr() as usize,
-                })
-            }
-            _ => None,
+pub fn remember_window(display: Option<RawDisplayHandle>, window: Option<RawWindowHandle>) {
+    WINDOW.get_or_init(|| match (display?, window?) {
+        (RawDisplayHandle::Wayland(display), RawWindowHandle::Wayland(window)) => {
+            Some(WindowPointers {
+                display: display.display.as_ptr() as usize,
+                surface: window.surface.as_ptr() as usize,
+            })
         }
+        _ => None,
     });
+}
+
+/// Platform key source backed by the Wayland keyboard grab.
+pub struct WaylandKeySource;
+
+impl KeySource for WaylandKeySource {
+    fn start(
+        &self,
+        sender: mpsc::Sender<PhysicalKeyEvent>,
+        wakeup: Box<dyn Fn() + Send + Sync>,
+    ) -> Option<Box<dyn PhysicalKeyboard>> {
+        KeyGrab::start(sender, wakeup).map(|grab| Box::new(grab) as Box<dyn PhysicalKeyboard>)
+    }
 }
 
 /// The session's keyboard listener on Wayland.
@@ -76,7 +71,7 @@ impl KeyGrab {
     /// Starts capturing physical keyboard events on Wayland, sending them through `sender`
     /// and waking the UI thread with `wakeup`.
     pub fn start(
-        sender: mpsc::Sender<WaylandKeyEvent>,
+        sender: mpsc::Sender<PhysicalKeyEvent>,
         wakeup: Box<dyn Fn() + Send + Sync>,
     ) -> Option<Self> {
         let Some(Some(window)) = WINDOW.get().copied() else {
@@ -106,10 +101,13 @@ impl KeyGrab {
             thread: Some(thread),
         })
     }
+}
 
+/// Physical keyboard implementation on Wayland.
+impl PhysicalKeyboard for KeyGrab {
     /// Whether the window is in full screen, so the desktop's shortcuts are
     /// held back and go to the PC.
-    pub fn set_fullscreen(&self, fullscreen: bool) {
+    fn set_fullscreen(&self, fullscreen: bool) {
         self.fullscreen.store(fullscreen, Ordering::Relaxed);
     }
 }
@@ -135,7 +133,7 @@ const fn lock_keys(mods_locked: u32) -> (bool, bool) {
 }
 
 struct State {
-    sender: mpsc::Sender<WaylandKeyEvent>,
+    sender: mpsc::Sender<PhysicalKeyEvent>,
     wakeup: Arc<dyn Fn() + Send + Sync>,
     shared: Shared,
     keyboard: Option<WlKeyboard>,
@@ -145,7 +143,7 @@ struct State {
 
 fn run(
     window: WindowPointers,
-    sender: mpsc::Sender<WaylandKeyEvent>,
+    sender: mpsc::Sender<PhysicalKeyEvent>,
     wakeup: Arc<dyn Fn() + Send + Sync>,
     stop: &AtomicBool,
     shared: Shared,
@@ -206,7 +204,7 @@ fn run(
                     "Keyboard repeat info not announced by desktop: using default 500ms delay, 25Hz rate",
                 );
             }
-            let _ = state.sender.send(WaylandKeyEvent::Repeat { evdev });
+            let _ = state.sender.send(PhysicalKeyEvent::Repeat { evdev });
             (state.wakeup)();
         }
 
@@ -228,7 +226,7 @@ fn run(
         }
     }
 
-    let _ = state.sender.send(WaylandKeyEvent::Leave);
+    let _ = state.sender.send(PhysicalKeyEvent::Leave);
     (state.wakeup)();
 
     if let Some(held_back) = inhibitor.take() {
@@ -304,7 +302,7 @@ impl Dispatch<WlKeyboard, ()> for State {
                 } else {
                     state.repeat.release(key);
                 }
-                let _ = state.sender.send(WaylandKeyEvent::Key {
+                let _ = state.sender.send(PhysicalKeyEvent::Key {
                     evdev: key,
                     pressed,
                 });
@@ -323,7 +321,7 @@ impl Dispatch<WlKeyboard, ()> for State {
                         if caps { "on" } else { "off" },
                         if num { "on" } else { "off" },
                     ));
-                    let _ = state.sender.send(WaylandKeyEvent::Modifiers { caps, num });
+                    let _ = state.sender.send(PhysicalKeyEvent::Modifiers { caps, num });
                     (state.wakeup)();
                 }
             }
@@ -335,12 +333,12 @@ impl Dispatch<WlKeyboard, ()> for State {
                     .iter()
                     .map(|b| u32::from_ne_bytes(*b))
                     .collect();
-                let _ = state.sender.send(WaylandKeyEvent::Enter { keys });
+                let _ = state.sender.send(PhysicalKeyEvent::Enter { keys });
                 (state.wakeup)();
             }
             wl_keyboard::Event::Leave { .. } => {
                 state.repeat.clear();
-                let _ = state.sender.send(WaylandKeyEvent::Leave);
+                let _ = state.sender.send(PhysicalKeyEvent::Leave);
                 (state.wakeup)();
             }
             _ => {}

@@ -77,7 +77,7 @@ pub(super) fn render(
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ui.ctx().clone();
         let wakeup = Box::new(move || ctx.request_repaint());
-        session.input.key_grab = crate::key_grab::KeyGrab::start(tx, wakeup);
+        session.input.key_grab = session.ports.keys.start(tx, wakeup);
         if session.input.key_grab.is_some() {
             session.input.wayland_keys_rx = Some(rx);
         }

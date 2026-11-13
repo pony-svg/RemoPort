@@ -15,9 +15,9 @@ use egui::{
     Rect, RichText, Rounding, Sense, TextureHandle, TextureOptions, Ui, Vec2,
 };
 use remoport_rdp::{
-    CertificateInfo, ClipboardText, Command, ConnectConfig, Error, Event as EngineEvent,
-    IdentityProblem, MouseButton, PointerShape, Rect as RemoteRect, RemotePointer, Session,
-    SharedFolder, SoundInput, SoundOutput, TrustReply, TrustStore,
+    ClipboardText, Command, ConnectConfig, Error, Event as EngineEvent, IdentityProblem,
+    MouseButton, PointerShape, Rect as RemoteRect, RemotePointer, SharedFolder, SoundInput,
+    SoundOutput, TrustStore,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,24 +30,14 @@ pub use display::*;
 pub mod signin;
 pub use signin::*;
 
-/// Limit for each step of the connection; the user's own decisions aside.
-const STEP_TIMEOUT: Duration = Duration::from_secs(30);
+pub mod controller;
+pub use controller::*;
 
 /// How near the top edge the pointer brings up the full-screen bar, in points.
 const BAR_EDGE: f32 = 4.0;
 
 /// How long full screen says how to leave it, since the bar is hidden there.
 const FULLSCREEN_HINT: Duration = Duration::from_secs(5);
-
-/// Attempts to bring a dropped connection back before giving up.
-const MAX_RECONNECTS: u32 = 20;
-
-/// Limit for each step of a reconnection: a network that is still down
-/// should cost the next attempt, not half a minute.
-const RECONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Engine events handled per repaint at most, so a burst cannot stall the UI.
-const EVENTS_PER_FRAME: usize = 2000;
 
 const DANGER: Color32 = Color32::from_rgb(0xc4, 0x2b, 0x1c);
 
@@ -74,29 +64,6 @@ impl PointerLook {
             hotspot: vec2(f32::from(shape.hotspot_x), f32::from(shape.hotspot_y)),
         }
     }
-}
-
-enum Phase {
-    /// Asking for the user name and password.
-    SignIn,
-    Connecting,
-    /// The PC's identity needs the user's decision; nothing has been sent.
-    VerifyIdentity {
-        info: CertificateInfo,
-        problem: IdentityProblem,
-        reply: Option<TrustReply>,
-        /// For a changed certificate: the user confirmed it was replaced.
-        replacement_confirmed: bool,
-    },
-    Connected,
-    /// The connection dropped and is being brought back: `at` is when this
-    /// attempt starts, `None` once it is under way.
-    Reconnecting {
-        attempt: u32,
-        at: Option<Instant>,
-    },
-    /// The session is over; holds what to tell the user.
-    Ended(String),
 }
 
 /// The remote desktop as last drawn, in RGBA, and its texture.
@@ -167,9 +134,8 @@ pub struct ActiveSession {
     pub notification_msg: Option<String>,
     /// Whether the PC is saved, so its password may be remembered.
     saved: bool,
-    phase: Phase,
+    pub controller: SessionController,
     pub signin: SignInState,
-    session: Option<Session>,
     screen: Option<Screen>,
     graphics: Option<String>,
     /// What the pointer looks like over the remote desktop.
@@ -217,9 +183,8 @@ impl ActiveSession {
             open_app: None,
             notification_msg: None,
             saved,
-            phase: Phase::SignIn,
+            controller: SessionController::new(),
             signin,
-            session: None,
             screen: None,
             graphics: None,
             pointer: PointerLook::System,
@@ -248,7 +213,7 @@ impl ActiveSession {
         // In full screen the PC gets the whole screen, and the bar shows over
         // it when the pointer reaches the top edge.
         let fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
-        if fullscreen && matches!(self.phase, Phase::Connected) {
+        if fullscreen && self.controller.is_connected() {
             self.floating_bar(&ui.ctx().clone(), on_disconnect);
         } else {
             self.bar_rect = None;
@@ -270,7 +235,7 @@ impl ActiveSession {
             return;
         }
 
-        if !matches!(self.phase, Phase::Connected) {
+        if !self.controller.is_connected() {
             self.key_grab = None;
             self.wayland_keys_rx = None;
             self.key_grab_tried = false;
@@ -291,15 +256,15 @@ impl ActiveSession {
         if let Phase::Reconnecting {
             attempt,
             at: Some(at),
-        } = self.phase
+        } = self.controller.phase
         {
             if Instant::now() >= at {
-                self.phase = Phase::Reconnecting { attempt, at: None };
+                self.controller.phase = Phase::Reconnecting { attempt, at: None };
                 self.start(RECONNECT_TIMEOUT);
             }
         }
 
-        match self.phase {
+        match self.controller.phase {
             Phase::SignIn => self.sign_in_form(ui, theme),
             Phase::Connecting => {
                 self.measure_canvas(ui);
@@ -319,7 +284,7 @@ impl ActiveSession {
         }
 
         if matches!(
-            self.phase,
+            self.controller.phase,
             Phase::Connecting | Phase::Connected | Phase::Reconnecting { .. }
         ) || self.signin.keyring.is_some()
         {
@@ -368,7 +333,7 @@ impl ActiveSession {
             ui.label(self.status());
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let connected = matches!(self.phase, Phase::Connected);
+                let connected = self.controller.is_connected();
                 if ui
                     .button(if connected {
                         t("❌ Disconnect")
@@ -463,7 +428,7 @@ impl ActiveSession {
     }
 
     fn status(&self) -> String {
-        match self.phase {
+        match self.controller.phase {
             Phase::SignIn => t("Sign in").to_string(),
             Phase::Connecting => t("Connecting…").to_string(),
             Phase::VerifyIdentity { .. } => t("Waiting for your decision").to_string(),
@@ -612,7 +577,7 @@ impl ActiveSession {
         let has_gateway = self.gateway_account().is_some();
         self.signin.prepare_connect(self.saved, has_gateway);
         if self.start(STEP_TIMEOUT) {
-            self.phase = Phase::Connecting;
+            self.controller.phase = Phase::Connecting;
         }
     }
 
@@ -621,7 +586,7 @@ impl ActiveSession {
     fn start(&mut self, timeout: Duration) -> bool {
         let Some(trust_store) = model::trust_store_path().map(TrustStore::new) else {
             self.forget_session();
-            self.phase = Phase::Ended(
+            self.controller.phase = Phase::Ended(
                 t("Remoport has no folder to keep trusted certificates in (HOME is not set).")
                     .to_string(),
             );
@@ -744,7 +709,7 @@ impl ActiveSession {
                 self.bookmark.gateway.trim()
             ));
         }
-        self.session = Some(Session::start(ConnectConfig {
+        self.controller.start(ConnectConfig {
             host: host.to_string(),
             port,
             username: user.to_string(),
@@ -781,7 +746,7 @@ impl ActiveSession {
                 kdc: Some(self.bookmark.kdc.trim().to_string()).filter(|k| !k.is_empty()),
             }),
             resume: self.signin.resume.clone(),
-        }));
+        });
         true
     }
 
@@ -800,16 +765,7 @@ impl ActiveSession {
     // ── Engine events ───────────────────────────────────────────────────
 
     fn poll_engine(&mut self) {
-        let Some(session) = &self.session else {
-            return;
-        };
-        let mut events = Vec::new();
-        while events.len() < EVENTS_PER_FRAME {
-            match session.try_event() {
-                Some(event) => events.push(event),
-                None => break,
-            }
-        }
+        let events = self.controller.poll_events();
         for event in events {
             self.handle(event);
         }
@@ -837,7 +793,7 @@ impl ActiveSession {
                     info.issuer,
                     info.sha256
                 ));
-                self.phase = Phase::VerifyIdentity {
+                self.controller.phase = Phase::VerifyIdentity {
                     info,
                     problem,
                     reply: Some(reply),
@@ -847,7 +803,7 @@ impl ActiveSession {
             EngineEvent::Connected { width, height } => {
                 logging::event(format_args!(
                     "{} {} at {width}×{height}",
-                    if matches!(self.phase, Phase::Reconnecting { .. }) {
+                    if matches!(self.controller.phase, Phase::Reconnecting { .. }) {
                         "Reconnected to"
                     } else {
                         "Connected to"
@@ -855,7 +811,7 @@ impl ActiveSession {
                     self.bookmark.pc_name
                 ));
                 self.screen = Some(Screen::new(width, height));
-                self.phase = Phase::Connected;
+                self.controller.phase = Phase::Connected;
                 // The PC may have Caps Lock on from before. Where this computer
                 // can say what its own lock keys are, that follows at once.
                 self.send(Command::LockKeys {
@@ -926,7 +882,7 @@ impl ActiveSession {
     fn session_ended(&mut self, outcome: Option<Error>) {
         self.signin.on_session_ended();
         // Attempts made so far, when the session was up or coming back.
-        let attempts = match self.phase {
+        let attempts = match self.controller.phase {
             Phase::Connected => Some(0),
             Phase::Reconnecting { attempt, .. } => Some(attempt),
             _ => None,
@@ -946,7 +902,7 @@ impl ActiveSession {
                         },
                         wait.as_secs()
                     ));
-                    self.phase = Phase::Reconnecting {
+                    self.controller.phase = Phase::Reconnecting {
                         attempt,
                         at: Some(Instant::now() + wait),
                     };
@@ -954,7 +910,7 @@ impl ActiveSession {
                 }
                 logging::event("Gave up reconnecting");
                 self.forget_session();
-                self.phase = Phase::Ended(tf(
+                self.controller.phase = Phase::Ended(tf(
                     "The connection to {} was lost and could not be brought back after {} \
                      attempts ({}).",
                     &[&self.bookmark.pc_name, &MAX_RECONNECTS, error],
@@ -966,8 +922,8 @@ impl ActiveSession {
         match outcome {
             None => {
                 logging::event("Session ended");
-                if !matches!(self.phase, Phase::Ended(_)) {
-                    self.phase = Phase::Ended(t("The session ended.").to_string());
+                if !matches!(self.controller.phase, Phase::Ended(_)) {
+                    self.controller.phase = Phase::Ended(t("The session ended.").to_string());
                 }
             }
             Some(error) => {
@@ -981,10 +937,10 @@ impl ActiveSession {
                             t("The PC refused the sign-in. Check the user name and password.")
                         };
                         self.signin.sign_in_error = Some(message.to_string());
-                        self.phase = Phase::SignIn;
+                        self.controller.phase = Phase::SignIn;
                     }
                     Error::NlaUnavailable => {
-                        self.phase = Phase::Ended(tf(
+                        self.controller.phase = Phase::Ended(tf(
                             "{} does not offer Network Level Authentication, so it would show \
                              its sign-in screen before checking who you are. Remoport does not \
                              connect that way unless you allow it for this PC (Edit → General), \
@@ -993,7 +949,7 @@ impl ActiveSession {
                         ));
                     }
                     Error::IdentityRejected => {
-                        self.phase = Phase::Ended(
+                        self.controller.phase = Phase::Ended(
                             t(
                                 "You chose not to connect: the PC's identity was not confirmed. \
                              Nothing was sent to it.",
@@ -1001,22 +957,14 @@ impl ActiveSession {
                             .to_string(),
                         );
                     }
-                    other => self.phase = Phase::Ended(explain(&other)),
+                    other => self.controller.phase = Phase::Ended(explain(&other)),
                 }
             }
         }
     }
 
     fn reset_session(&mut self) {
-        if let Some(mut session) = self.session.take() {
-            session.disconnect();
-            // What the engine said on its way out still belongs in the log.
-            while let Some(event) = session.try_event() {
-                if let EngineEvent::Progress(message) = event {
-                    logging::event(message);
-                }
-            }
-        }
+        self.controller.disconnect();
         self.screen = None;
         self.display.display_control = false;
         self.display.reset();
@@ -1034,9 +982,7 @@ impl ActiveSession {
     }
 
     fn send(&self, command: Command) {
-        if let Some(session) = &self.session {
-            session.send(command);
-        }
+        self.controller.send(command);
     }
 
     fn send_key(&self, (scancode, extended): keymap::Scancode, pressed: bool) {
@@ -1158,7 +1104,7 @@ impl ActiveSession {
             problem,
             replacement_confirmed,
             ..
-        } = &mut self.phase
+        } = &mut self.controller.phase
         else {
             return;
         };
@@ -1274,7 +1220,7 @@ impl ActiveSession {
 
         if let Some(trust) = decision {
             let (host, sha) = (info.host.clone(), info.sha256.clone());
-            if let Phase::VerifyIdentity { reply, .. } = &mut self.phase {
+            if let Phase::VerifyIdentity { reply, .. } = &mut self.controller.phase {
                 if let Some(reply) = reply.take() {
                     reply.answer(trust);
                 }
@@ -1283,7 +1229,7 @@ impl ActiveSession {
                 "{} the certificate of {host} ({sha})",
                 if trust { "You trusted" } else { "You declined" }
             ));
-            self.phase = Phase::Connecting;
+            self.controller.phase = Phase::Connecting;
         }
     }
 
@@ -1780,7 +1726,7 @@ impl ActiveSession {
                 logging::event("Stopped reconnecting");
                 self.reset_session();
                 self.forget_session();
-                self.phase = Phase::Ended(t("You stopped reconnecting.").to_string());
+                self.controller.phase = Phase::Ended(t("You stopped reconnecting.").to_string());
             }
         });
     }
@@ -1814,7 +1760,7 @@ impl ActiveSession {
             {
                 logging::event("Try again");
                 self.signin.sign_in_error = None;
-                self.phase = Phase::SignIn;
+                self.controller.phase = Phase::SignIn;
             }
         });
     }
@@ -1825,88 +1771,6 @@ impl Drop for ActiveSession {
         // Any password still held is wiped by its Zeroizing wrapper; the
         // engine's thread is stopped here rather than left running.
         self.reset_session();
-    }
-}
-
-/// This computer's name as the PC will see it: the host name, cut to the 15
-/// characters RDP carries, or "Remoport".
-fn client_name() -> String {
-    let name = std::fs::read_to_string("/etc/hostname").unwrap_or_default();
-    let name: String = name.trim().chars().take(15).collect();
-    if name.is_empty() {
-        "Remoport".to_string()
-    } else {
-        name
-    }
-}
-
-/// Whether a failure is the network's, so another attempt may bring the
-/// session back. Only a dropped link starts reconnecting; while
-/// reconnecting, a PC that cannot be reached yet is worth another try too.
-fn worth_retrying(error: &Error, reconnecting: bool) -> bool {
-    match error {
-        Error::ConnectionLost(_) => true,
-        Error::Unreachable(_) | Error::Timeout(_) | Error::Protocol(_) | Error::Gateway(_) => {
-            reconnecting
-        }
-        _ => false,
-    }
-}
-
-/// The wait before each attempt: quick at first, then every five seconds.
-fn reconnect_delay(attempt: u32) -> Duration {
-    Duration::from_secs(match attempt {
-        0 | 1 => 1,
-        2 => 2,
-        3 => 4,
-        _ => 5,
-    })
-}
-
-/// What an engine failure means. The engine's own words carry the detail,
-/// in English; in Spanish a lead-in says what happened.
-fn explain(error: &Error) -> String {
-    let detail = error.to_string();
-    if !crate::i18n::spanish() {
-        return capitalize(&detail);
-    }
-    match error {
-        Error::Unreachable(_) => format!("No se pudo llegar al PC: {detail}"),
-        Error::Timeout(_) => format!("El PC tardó demasiado en responder: {detail}"),
-        Error::Gateway(_) => format!("El RD Gateway no abrió el camino al PC: {detail}"),
-        Error::ConnectionLost(_) => format!("Se perdió la conexión: {detail}"),
-        Error::BrokerRedirect => {
-            "El PC envió la sesión a otro servidor, y aún no se admiten los agentes de conexión."
-                .to_string()
-        }
-        _ => format!("La conexión falló: {detail}"),
-    }
-}
-
-fn capitalize(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect::<String>() + "."
-    })
-}
-
-/// `host` and `port` from `host` or `host:port` (port 3389 by default).
-fn split_host_port(target: &str) -> (&str, u16) {
-    match target.rsplit_once(':') {
-        Some((host, port)) if !host.contains(':') => match port.parse() {
-            Ok(port) => (host, port),
-            Err(_) => (target, 3389),
-        },
-        _ => (target, 3389),
-    }
-}
-
-/// The domain and user of `DOMAIN\user`; other forms (`user`, `user@domain`)
-/// are passed whole.
-fn split_domain(username: &str) -> (Option<&str>, &str) {
-    match username.split_once('\\') {
-        Some((domain, user)) if !domain.is_empty() => (Some(domain), user),
-        _ => (None, username),
     }
 }
 
@@ -1977,26 +1841,6 @@ fn to_i16(value: f32) -> i16 {
 mod tests {
     use super::*;
     use zeroize::Zeroizing;
-
-    #[test]
-    fn host_and_port_are_split() {
-        assert_eq!(split_host_port("pc.example.com"), ("pc.example.com", 3389));
-        assert_eq!(
-            split_host_port("pc.example.com:3390"),
-            ("pc.example.com", 3390)
-        );
-        assert_eq!(split_host_port("10.0.0.5:abc"), ("10.0.0.5:abc", 3389));
-        // A bare IPv6 address is not mistaken for host:port.
-        assert_eq!(split_host_port("fe80::1"), ("fe80::1", 3389));
-    }
-
-    #[test]
-    fn a_backslash_separates_the_domain() {
-        assert_eq!(split_domain("SHD\\jdoe"), (Some("SHD"), "jdoe"));
-        assert_eq!(split_domain("jdoe@shd.gov.co"), (None, "jdoe@shd.gov.co"));
-        assert_eq!(split_domain("jdoe"), (None, "jdoe"));
-        assert_eq!(split_domain("\\jdoe"), (None, "\\jdoe"));
-    }
 
     #[test]
     fn only_a_swallowed_ctrl_v_is_sent_without_its_press() {
@@ -2213,12 +2057,12 @@ mod tests {
     fn a_dropped_session_comes_back_until_it_cannot() {
         let pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         let mut view = ActiveSession::new(pc, false);
-        view.phase = Phase::Connected;
+        view.controller.phase = Phase::Connected;
         view.signin.session_password = Some(Zeroizing::new("secret".into()));
 
         view.session_ended(Some(Error::ConnectionLost("reset".into())));
         assert!(matches!(
-            view.phase,
+            view.controller.phase,
             Phase::Reconnecting {
                 attempt: 1,
                 at: Some(_)
@@ -2227,13 +2071,13 @@ mod tests {
         for expected in 2..=MAX_RECONNECTS {
             view.session_ended(Some(Error::Unreachable("no route".into())));
             assert!(
-                matches!(view.phase, Phase::Reconnecting { attempt, .. } if attempt == expected)
+                matches!(view.controller.phase, Phase::Reconnecting { attempt, .. } if attempt == expected)
             );
             assert!(view.signin.session_password.is_some());
         }
         view.session_ended(Some(Error::Timeout("reaching the PC")));
         assert!(
-            matches!(view.phase, Phase::Ended(ref why) if why.contains("could not be brought back"))
+            matches!(view.controller.phase, Phase::Ended(ref why) if why.contains("could not be brought back"))
         );
         assert!(
             view.signin.session_password.is_none(),
@@ -2245,36 +2089,20 @@ mod tests {
     fn a_refused_password_while_reconnecting_asks_again_and_wipes_it() {
         let pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         let mut view = ActiveSession::new(pc, false);
-        view.phase = Phase::Reconnecting {
+        view.controller.phase = Phase::Reconnecting {
             attempt: 3,
             at: None,
         };
         view.signin.session_password = Some(Zeroizing::new("old".into()));
         view.session_ended(Some(Error::Authentication("changed".into())));
-        assert!(matches!(view.phase, Phase::SignIn));
+        assert!(matches!(view.controller.phase, Phase::SignIn));
         assert!(view.signin.session_password.is_none());
 
         // A session the PC ended itself is not brought back.
-        view.phase = Phase::Connected;
+        view.controller.phase = Phase::Connected;
         view.signin.session_password = Some(Zeroizing::new("secret".into()));
         view.session_ended(None);
-        assert!(matches!(view.phase, Phase::Ended(_)));
+        assert!(matches!(view.controller.phase, Phase::Ended(_)));
         assert!(view.signin.session_password.is_none());
-    }
-
-    #[test]
-    fn reconnecting_starts_quick_and_settles() {
-        let waits: Vec<u64> = (1..=6).map(|a| reconnect_delay(a).as_secs()).collect();
-        assert_eq!(waits, vec![1, 2, 4, 5, 5, 5]);
-        let total: u64 = (1..=MAX_RECONNECTS)
-            .map(|a| reconnect_delay(a).as_secs())
-            .sum();
-        assert!(total <= 120, "{total} s of waiting");
-    }
-
-    #[test]
-    fn the_client_name_fits_rdp() {
-        let name = client_name();
-        assert!(!name.is_empty() && name.chars().count() <= 15);
     }
 }

@@ -520,29 +520,12 @@ mod tests {
     use super::*;
 
     fn config() -> ConnectConfig {
-        ConnectConfig {
-            host: "pc.example".to_string(),
-            port: 3389,
-            username: "jdoe".to_string(),
-            domain: None,
-            password: zeroize::Zeroizing::new(String::new()),
-            width: 1280,
-            height: 720,
-            monitors: Vec::new(),
-            scale: 100,
-            color_depth: 32,
-            allow_without_nla: false,
-            trust_store: crate::TrustStore::new(std::env::temp_dir().join("unused.json")),
-            timeout: Duration::from_secs(1),
-            client_name: "test".to_string(),
-            clipboard: false,
-            sound: None,
-            microphone: None,
-            folders: Vec::new(),
-            gateway: None,
-            kerberos: None,
-            resume: None,
-        }
+        ConnectConfig::new(
+            "pc.example".to_string(),
+            "jdoe".to_string(),
+            zeroize::Zeroizing::new(String::new()),
+            crate::TrustStore::new(std::env::temp_dir().join("unused.json")),
+        )
     }
 
     #[test]

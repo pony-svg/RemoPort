@@ -98,6 +98,41 @@ pub struct ConnectConfig {
     pub resume: Option<ResumeCookie>,
 }
 
+impl ConnectConfig {
+    /// Creates a connection configuration with standard defaults for an RDP session.
+    #[must_use]
+    pub fn new(
+        host: String,
+        username: String,
+        password: Zeroizing<String>,
+        trust_store: TrustStore,
+    ) -> Self {
+        Self {
+            host,
+            port: 3389,
+            username,
+            domain: None,
+            password,
+            width: 1280,
+            height: 720,
+            monitors: Vec::new(),
+            scale: 100,
+            color_depth: 32,
+            allow_without_nla: false,
+            trust_store,
+            timeout: Duration::from_secs(10),
+            client_name: "Remoport".to_string(),
+            clipboard: false,
+            sound: None,
+            microphone: None,
+            folders: Vec::new(),
+            gateway: None,
+            kerberos: None,
+            resume: None,
+        }
+    }
+}
+
 /// The PC's cookie for a session ([MS-RDPBCGR] 2.2.4.2): presented when
 /// reconnecting, it proves this computer was the one attached, and the PC
 /// resumes that session instead of signing in anew. It is credential

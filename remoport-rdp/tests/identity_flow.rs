@@ -67,29 +67,18 @@ async fn fake_server(reply: ConnectionConfirm) -> (u16, Vec<u8>, oneshot::Receiv
 }
 
 fn config(port: u16, store: &TrustStore) -> ConnectConfig {
-    ConnectConfig {
-        host: "localhost".to_string(),
-        port,
-        username: "tester".to_string(),
-        domain: None,
-        password: Zeroizing::new("not-a-real-password".to_string()),
-        width: 1024,
-        height: 768,
-        monitors: Vec::new(),
-        scale: 100,
-        color_depth: 32,
-        allow_without_nla: false,
-        trust_store: store.clone(),
-        timeout: Duration::from_secs(5),
-        client_name: "remoport-test".to_string(),
-        clipboard: false,
-        sound: None,
-        microphone: None,
-        folders: Vec::new(),
-        gateway: None,
-        kerberos: None,
-        resume: None,
-    }
+    let mut config = ConnectConfig::new(
+        "localhost".to_string(),
+        "tester".to_string(),
+        Zeroizing::new("not-a-real-password".to_string()),
+        store.clone(),
+    );
+    config.port = port;
+    config.width = 1024;
+    config.height = 768;
+    config.timeout = Duration::from_secs(5);
+    config.client_name = "remoport-test".to_string();
+    config
 }
 
 fn scratch_store(name: &str) -> (std::path::PathBuf, TrustStore) {

@@ -120,29 +120,13 @@ mod tests {
 
     #[test]
     fn the_gateway_signs_in_with_its_own_account_or_the_pcs() {
-        let config = ConnectConfig {
-            host: "pc".to_string(),
-            port: 3389,
-            username: "ana".to_string(),
-            domain: Some("CORP".to_string()),
-            password: zeroize::Zeroizing::new("pc-secret".to_string()),
-            width: 1280,
-            height: 720,
-            monitors: Vec::new(),
-            scale: 100,
-            color_depth: 32,
-            allow_without_nla: false,
-            trust_store: crate::TrustStore::new(std::env::temp_dir().join("unused.json")),
-            timeout: std::time::Duration::from_secs(1),
-            client_name: "test".to_string(),
-            clipboard: false,
-            sound: None,
-            microphone: None,
-            folders: Vec::new(),
-            gateway: None,
-            kerberos: None,
-            resume: None,
-        };
+        let mut config = ConnectConfig::new(
+            "pc".to_string(),
+            "ana".to_string(),
+            zeroize::Zeroizing::new("pc-secret".to_string()),
+            crate::TrustStore::new(std::env::temp_dir().join("unused.json")),
+        );
+        config.domain = Some("CORP".to_string());
         let shared = Gateway {
             address: "gw".to_string(),
             account: None,

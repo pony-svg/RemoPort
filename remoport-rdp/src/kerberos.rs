@@ -285,29 +285,14 @@ mod tests {
     }
 
     fn config(host: &str, username: &str, domain: Option<&str>) -> ConnectConfig {
-        ConnectConfig {
-            host: host.to_string(),
-            port: 3389,
-            username: username.to_string(),
-            domain: domain.map(str::to_string),
-            password: zeroize::Zeroizing::new(String::new()),
-            width: 1280,
-            height: 720,
-            monitors: Vec::new(),
-            scale: 100,
-            color_depth: 32,
-            allow_without_nla: false,
-            trust_store: crate::TrustStore::new(std::env::temp_dir().join("unused.json")),
-            timeout: std::time::Duration::from_secs(1),
-            client_name: "test".to_string(),
-            clipboard: false,
-            sound: None,
-            microphone: None,
-            folders: Vec::new(),
-            gateway: None,
-            kerberos: None,
-            resume: None,
-        }
+        let mut config = ConnectConfig::new(
+            host.to_string(),
+            username.to_string(),
+            zeroize::Zeroizing::new(String::new()),
+            crate::TrustStore::new(std::env::temp_dir().join("unused.json")),
+        );
+        config.domain = domain.map(str::to_string);
+        config
     }
 
     #[test]

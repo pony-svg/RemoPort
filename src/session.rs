@@ -43,42 +43,106 @@ const FULLSCREEN_HINT: Duration = Duration::from_secs(5);
 
 const DANGER: Color32 = Color32::from_rgb(0xc4, 0x2b, 0x1c);
 
-pub struct ActiveSession {
-    pub bookmark: DeviceBookmark,
-    pub open_app: Option<String>,
-    pub notification_msg: Option<String>,
-    /// Whether the PC is saved, so its password may be remembered.
-    saved: bool,
-    pub controller: SessionController,
-    pub signin: SignInState,
-    pub screen: ScreenState,
+struct SessionInput {
     /// Modifier keys held on the remote side.
     modifiers: Modifiers,
     last_pointer: Option<(u16, u16)>,
+    /// The desktop's reserved keys, held back while in full screen.
+    key_grab: Option<KeyGrab>,
+    /// Asked for this stretch of full screen, whether it could be had or not.
+    key_grab_tried: bool,
+    /// Events from the physical Wayland keyboard listener.
+    wayland_keys_rx: Option<std::sync::mpsc::Receiver<crate::key_grab::WaylandKeyEvent>>,
+    /// State machine tracking physical and fallback keys.
+    state: crate::input::KeyState,
+    /// Keys pressed via egui fallback when Wayland is not available.
+    fallback_keys_down: HashSet<keymap::Scancode>,
+}
+
+impl SessionInput {
+    fn new(share_clipboard: bool) -> Self {
+        Self {
+            modifiers: Modifiers::NONE,
+            last_pointer: None,
+            key_grab: None,
+            key_grab_tried: false,
+            wayland_keys_rx: None,
+            state: crate::input::KeyState::new(false, share_clipboard),
+            fallback_keys_down: HashSet::new(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.modifiers = Modifiers::NONE;
+        self.key_grab = None;
+        self.key_grab_tried = false;
+        self.wayland_keys_rx = None;
+        self.state.handle_leave();
+        self.fallback_keys_down.clear();
+    }
+}
+
+struct SessionMedia {
     /// Text the PC copied, until it is taken (or not) on the next frame.
     remote_copy: Option<ClipboardText>,
     /// The PC has the microphone open.
     microphone_live: bool,
     /// The user muted the microphone; the PC then gets silence.
     microphone_muted: Arc<AtomicBool>,
+}
+
+impl SessionMedia {
+    fn new() -> Self {
+        Self {
+            remote_copy: None,
+            microphone_live: false,
+            microphone_muted: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.remote_copy = None;
+        self.microphone_live = false;
+    }
+}
+
+pub struct ViewState {
+    pub notification_msg: Option<String>,
     /// Give the remote screen the keyboard back after a menu took it.
     refocus: bool,
     /// Until when full screen says how to leave it.
     fullscreen_hint_until: Option<Instant>,
-    /// The desktop's reserved keys, held back while in full screen.
-    key_grab: Option<KeyGrab>,
-    /// Asked for this stretch of full screen, whether it could be had or not.
-    key_grab_tried: bool,
     /// Where the bar lies while it shows over a full-screen session.
     bar_rect: Option<Rect>,
-    /// Events from the physical Wayland keyboard listener.
-    wayland_keys_rx: Option<std::sync::mpsc::Receiver<crate::key_grab::WaylandKeyEvent>>,
-    /// State machine tracking physical and fallback keys.
-    input_state: crate::input::KeyState,
-    /// Keys pressed via egui fallback when Wayland is not available.
-    fallback_keys_down: HashSet<keymap::Scancode>,
-    /// Size, scale, and layout state for the session's displays.
+}
+
+impl ViewState {
+    fn new() -> Self {
+        Self {
+            notification_msg: None,
+            refocus: false,
+            fullscreen_hint_until: None,
+            bar_rect: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.bar_rect = None;
+    }
+}
+
+pub struct ActiveSession {
+    pub bookmark: DeviceBookmark,
+    pub open_app: Option<String>,
+    /// Whether the PC is saved, so its password may be remembered.
+    saved: bool,
+    pub controller: SessionController,
+    pub signin: SignInState,
     pub display: DisplayState,
+    pub screen: ScreenState,
+    input: SessionInput,
+    media: SessionMedia,
+    view: ViewState,
 }
 
 impl ActiveSession {
@@ -91,25 +155,14 @@ impl ActiveSession {
         Self {
             bookmark,
             open_app: None,
-            notification_msg: None,
             saved,
             controller: SessionController::new(),
             signin,
-            screen: ScreenState::new(),
-            modifiers: Modifiers::NONE,
-            last_pointer: None,
-            remote_copy: None,
-            microphone_live: false,
-            microphone_muted: Arc::new(AtomicBool::new(false)),
-            refocus: false,
-            fullscreen_hint_until: None,
-            key_grab: None,
-            key_grab_tried: false,
-            bar_rect: None,
-            wayland_keys_rx: None,
-            input_state: crate::input::KeyState::new(false, share_clipboard),
-            fallback_keys_down: HashSet::new(),
             display: DisplayState::new(screens),
+            screen: ScreenState::new(),
+            input: SessionInput::new(share_clipboard),
+            media: SessionMedia::new(),
+            view: ViewState::new(),
         }
     }
 
@@ -123,12 +176,12 @@ impl ActiveSession {
         if fullscreen && self.controller.is_connected() {
             self.floating_bar(&ui.ctx().clone(), on_disconnect);
         } else {
-            self.bar_rect = None;
+            self.view.bar_rect = None;
             egui::Frame::none()
                 .inner_margin(egui::Margin::symmetric(12.0, 6.0))
                 .show(ui, |ui| self.top_bar(ui, on_disconnect));
             ui.separator();
-            if let Some(ref msg) = self.notification_msg {
+            if let Some(ref msg) = self.view.notification_msg {
                 ui.colored_label(theme.accent, format!("ℹ {msg}"));
             }
         }
@@ -143,20 +196,20 @@ impl ActiveSession {
         }
 
         if !self.controller.is_connected() {
-            self.key_grab = None;
-            self.wayland_keys_rx = None;
-            self.key_grab_tried = false;
-        } else if !self.key_grab_tried {
-            self.key_grab_tried = true;
+            self.input.key_grab = None;
+            self.input.wayland_keys_rx = None;
+            self.input.key_grab_tried = false;
+        } else if !self.input.key_grab_tried {
+            self.input.key_grab_tried = true;
             let (tx, rx) = std::sync::mpsc::channel();
             let ctx = ui.ctx().clone();
             let wakeup = Box::new(move || ctx.request_repaint());
-            self.key_grab = KeyGrab::start(tx, wakeup);
-            if self.key_grab.is_some() {
-                self.wayland_keys_rx = Some(rx);
+            self.input.key_grab = KeyGrab::start(tx, wakeup);
+            if self.input.key_grab.is_some() {
+                self.input.wayland_keys_rx = Some(rx);
             }
         }
-        if let Some(grab) = &self.key_grab {
+        if let Some(grab) = &self.input.key_grab {
             grab.set_fullscreen(fullscreen);
         }
 
@@ -208,11 +261,12 @@ impl ActiveSession {
         let pointer = ctx.input(|i| i.pointer.latest_pos());
         let at_edge = pointer.is_some_and(|p| p.y <= BAR_EDGE);
         let on_bar = self
+            .view
             .bar_rect
             .zip(pointer)
             .is_some_and(|(bar, p)| bar.expand(BAR_EDGE).contains(p));
         if !(at_edge || on_bar || ctx.memory(egui::Memory::any_popup_open)) {
-            self.bar_rect = None;
+            self.view.bar_rect = None;
             return;
         }
         let width = ctx.screen_rect().width();
@@ -228,7 +282,7 @@ impl ActiveSession {
                         self.top_bar(ui, on_disconnect);
                     });
             });
-        self.bar_rect = Some(shown.response.rect);
+        self.view.bar_rect = Some(shown.response.rect);
     }
 
     fn top_bar(&mut self, ui: &mut Ui, on_disconnect: &mut bool) {
@@ -260,8 +314,8 @@ impl ActiveSession {
                     ));
                     *on_disconnect = true;
                 }
-                if connected && self.microphone_live {
-                    let muted = self.microphone_muted.load(Ordering::Relaxed);
+                if connected && self.media.microphone_live {
+                    let muted = self.media.microphone_muted.load(Ordering::Relaxed);
                     let label = if muted {
                         RichText::new(t("Microphone muted"))
                     } else {
@@ -276,7 +330,7 @@ impl ActiveSession {
                         })
                         .clicked()
                     {
-                        self.microphone_muted.store(!muted, Ordering::Relaxed);
+                        self.media.microphone_muted.store(!muted, Ordering::Relaxed);
                         logging::event(if muted {
                             "Microphone unmuted"
                         } else {
@@ -303,16 +357,16 @@ impl ActiveSession {
                         "Full screen"
                     });
                     if !fullscreen {
-                        self.fullscreen_hint_until = Some(Instant::now() + FULLSCREEN_HINT);
+                        self.view.fullscreen_hint_until = Some(Instant::now() + FULLSCREEN_HINT);
                     }
-                    self.refocus = true;
+                    self.view.refocus = true;
                 }
                 if connected {
                     ui.menu_button(t("⌨ Keys"), |ui| {
                         if ui.button("Ctrl+Alt+Del").clicked() {
                             logging::event("Sent Ctrl+Alt+Del");
                             self.send(Command::CtrlAltDel);
-                            self.refocus = true;
+                            self.view.refocus = true;
                             ui.close_menu();
                         }
                         for (label, keys) in keymap::COMBINATIONS {
@@ -321,7 +375,7 @@ impl ActiveSession {
                                 for (key, pressed) in keymap::strokes(keys) {
                                     self.send_key(key, pressed);
                                 }
-                                self.refocus = true;
+                                self.view.refocus = true;
                                 ui.close_menu();
                             }
                         }
@@ -371,11 +425,11 @@ impl ActiveSession {
     fn poll_keyring(&mut self) {
         match self.signin.poll_keyring(&self.bookmark.pc_name) {
             Some(KeyringEvent::Saved) => {
-                self.notification_msg =
+                self.view.notification_msg =
                     Some(t("Your password is remembered in the system keyring.").to_string());
             }
             Some(KeyringEvent::Failed(_)) => {
-                self.notification_msg = Some(
+                self.view.notification_msg = Some(
                     t("The system keyring is not available, so no password is remembered.")
                         .to_string(),
                 );
@@ -556,7 +610,7 @@ impl ActiveSession {
             .then(|| Box::new(crate::audio::Speaker::new()) as Box<dyn SoundOutput>);
         let microphone = self.bookmark.redirect_microphones.then(|| {
             Box::new(crate::audio::Microphone::new(Arc::clone(
-                &self.microphone_muted,
+                &self.media.microphone_muted,
             ))) as Box<dyn SoundInput>
         });
         let folders: Vec<SharedFolder> = self
@@ -755,8 +809,8 @@ impl ActiveSession {
                 self.display.display_control = true;
             }
             EngineEvent::Pointer(pointer) => self.screen.set_pointer(pointer),
-            EngineEvent::Clipboard(text) => self.remote_copy = Some(text),
-            EngineEvent::Microphone(live) => self.microphone_live = live,
+            EngineEvent::Clipboard(text) => self.media.remote_copy = Some(text),
+            EngineEvent::Microphone(live) => self.media.microphone_live = live,
             EngineEvent::Monitors(mut monitors) => {
                 monitors.sort_by_key(|m| (m.x, m.y));
                 logging::event(format_args!(
@@ -865,15 +919,9 @@ impl ActiveSession {
         self.screen.reset();
         self.display.display_control = false;
         self.display.reset();
-        self.modifiers = Modifiers::NONE;
-        self.remote_copy = None;
-        self.microphone_live = false;
-        self.key_grab = None;
-        self.key_grab_tried = false;
-        self.wayland_keys_rx = None;
-        self.input_state.handle_leave();
-        self.fallback_keys_down.clear();
-        self.bar_rect = None;
+        self.input.reset();
+        self.media.reset();
+        self.view.reset();
     }
 
     fn send(&self, command: Command) {
@@ -933,7 +981,7 @@ impl ActiveSession {
                 }
                 crate::input::InputAction::ToggleFullscreen => {
                     if !fullscreen {
-                        self.fullscreen_hint_until = Some(Instant::now() + FULLSCREEN_HINT);
+                        self.view.fullscreen_hint_until = Some(Instant::now() + FULLSCREEN_HINT);
                     }
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
                     logging::event(if fullscreen {
@@ -947,7 +995,7 @@ impl ActiveSession {
     }
 
     fn poll_wayland_keys(&mut self, ctx: &egui::Context, focused: bool, fullscreen: bool) {
-        let Some(rx) = &self.wayland_keys_rx else {
+        let Some(rx) = &self.input.wayland_keys_rx else {
             return;
         };
         let now = Instant::now();
@@ -956,14 +1004,14 @@ impl ActiveSession {
             match event {
                 crate::key_grab::WaylandKeyEvent::Key { evdev, pressed } => {
                     if focused {
-                        if pressed && self.input_state.is_alt_held() {
+                        if pressed && self.input.state.is_alt_held() {
                             match evdev {
                                 15 => logging::event("Sent Alt+Tab"),
                                 62 => logging::event("Sent Alt+F4"),
                                 _ => {}
                             }
                         }
-                        let actions = self.input_state.handle_physical_key(evdev, pressed, now);
+                        let actions = self.input.state.handle_physical_key(evdev, pressed, now);
                         self.execute_input_actions(actions, ctx, fullscreen);
                     }
                 }
@@ -975,15 +1023,15 @@ impl ActiveSession {
                     });
                 }
                 crate::key_grab::WaylandKeyEvent::Enter { keys } => {
-                    self.input_state.handle_enter(&keys);
+                    self.input.state.handle_enter(&keys);
                 }
                 crate::key_grab::WaylandKeyEvent::Leave => {
-                    let actions = self.input_state.handle_leave();
+                    let actions = self.input.state.handle_leave();
                     self.execute_input_actions(actions, ctx, fullscreen);
                 }
                 crate::key_grab::WaylandKeyEvent::Repeat { evdev } => {
                     if focused {
-                        let actions = self.input_state.handle_physical_key(evdev, true, now);
+                        let actions = self.input.state.handle_physical_key(evdev, true, now);
                         self.execute_input_actions(actions, ctx, fullscreen);
                     }
                 }
@@ -1205,7 +1253,7 @@ impl ActiveSession {
                     });
             });
         }
-        let has_wayland = self.key_grab.is_some();
+        let has_wayland = self.input.key_grab.is_some();
         if !has_wayland {
             self.sync_modifiers(focus.map_or(Modifiers::NONE, |(modifiers, _)| modifiers));
         }
@@ -1213,24 +1261,25 @@ impl ActiveSession {
         if focus.is_none() {
             if has_wayland {
                 let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-                let actions = self.input_state.handle_leave();
+                let actions = self.input.state.handle_leave();
                 self.execute_input_actions(actions, &ctx, fullscreen);
             } else {
-                for key in std::mem::take(&mut self.fallback_keys_down) {
+                for key in std::mem::take(&mut self.input.fallback_keys_down) {
                     self.send_key(key, false);
                 }
             }
         }
         if has_wayland {
             let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-            self.input_state.set_fullscreen(fullscreen);
-            self.input_state
+            self.input.state.set_fullscreen(fullscreen);
+            self.input
+                .state
                 .set_share_clipboard(self.bookmark.share_clipboard);
             self.poll_wayland_keys(&ctx, focus.is_some(), fullscreen);
-            let tick_actions = self.input_state.tick(Instant::now());
+            let tick_actions = self.input.state.tick(Instant::now());
             self.execute_input_actions(tick_actions, &ctx, fullscreen);
         }
-        if let Some(text) = self.remote_copy.take() {
+        if let Some(text) = self.media.remote_copy.take() {
             // Only while the user works in the session: a PC copying on its
             // own does not get to replace this computer's clipboard.
             if focus.is_some_and(|(_, window_focused)| window_focused) {
@@ -1320,6 +1369,7 @@ impl ActiveSession {
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         if fullscreen
             && self
+                .view
                 .fullscreen_hint_until
                 .is_some_and(|until| Instant::now() < until)
         {
@@ -1350,7 +1400,7 @@ impl ActiveSession {
         }
         if response.clicked()
             || response.drag_started()
-            || (index == 0 && std::mem::take(&mut self.refocus))
+            || (index == 0 && std::mem::take(&mut self.view.refocus))
         {
             response.request_focus();
         }
@@ -1404,7 +1454,7 @@ impl ActiveSession {
             }
         }
 
-        let bar = self.bar_rect.filter(|_| index == 0);
+        let bar = self.view.bar_rect.filter(|_| index == 0);
         let to_remote = |pos: egui::Pos2| -> Option<(u16, u16)> {
             if !rect.contains(pos) || bar.is_some_and(|bar| bar.contains(pos)) {
                 return None;
@@ -1412,13 +1462,15 @@ impl ActiveSession {
             remote_point(pos, image, region)
         };
 
-        let has_wayland = self.key_grab.is_some();
+        let has_wayland = self.input.key_grab.is_some();
         let (events, modifiers) = ui.input(|i| (i.events.clone(), i.modifiers));
         for event in events {
             match event {
                 Event::PointerMoved(pos) => {
-                    if let Some(at) = to_remote(pos).filter(|at| self.last_pointer != Some(*at)) {
-                        self.last_pointer = Some(at);
+                    if let Some(at) =
+                        to_remote(pos).filter(|at| self.input.last_pointer != Some(*at))
+                    {
+                        self.input.last_pointer = Some(at);
                         self.send(Command::PointerMove { x: at.0, y: at.1 });
                     }
                 }
@@ -1429,7 +1481,11 @@ impl ActiveSession {
                     ..
                 } => {
                     // A release outside the picture still goes, so no button sticks.
-                    let at = to_remote(pos).or(if pressed { None } else { self.last_pointer });
+                    let at = to_remote(pos).or(if pressed {
+                        None
+                    } else {
+                        self.input.last_pointer
+                    });
                     if let Some((x, y)) = at {
                         self.send(Command::MouseButton {
                             x,
@@ -1463,7 +1519,8 @@ impl ActiveSession {
                 } if focused && modifiers.ctrl && modifiers.alt => {
                     if !has_wayland && pressed {
                         if !fullscreen {
-                            self.fullscreen_hint_until = Some(Instant::now() + FULLSCREEN_HINT);
+                            self.view.fullscreen_hint_until =
+                                Some(Instant::now() + FULLSCREEN_HINT);
                         }
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
                         logging::event(if fullscreen {
@@ -1493,7 +1550,7 @@ impl ActiveSession {
                         }
                         if let Some(code) = keymap::scancode(physical_key.unwrap_or(key)) {
                             let strokes = strokes_for(
-                                &mut self.fallback_keys_down,
+                                &mut self.input.fallback_keys_down,
                                 code,
                                 pressed,
                                 modifiers.ctrl,
@@ -1508,22 +1565,22 @@ impl ActiveSession {
                 // swallows the key press; the release still arrives as a key.
                 Event::Copy if focused => {
                     if !has_wayland {
-                        self.fallback_keys_down.insert(keymap::C);
+                        self.input.fallback_keys_down.insert(keymap::C);
                         self.send_key(keymap::C, true);
                     }
                 }
                 Event::Cut if focused => {
                     if !has_wayland {
-                        self.fallback_keys_down.insert(keymap::X);
+                        self.input.fallback_keys_down.insert(keymap::X);
                         self.send_key(keymap::X, true);
                     }
                 }
                 Event::Paste(text) if focused => {
                     if has_wayland {
-                        let actions = self.input_state.handle_egui_paste(text, Instant::now());
+                        let actions = self.input.state.handle_egui_paste(text, Instant::now());
                         self.execute_input_actions(actions, &ctx, fullscreen);
                     } else {
-                        self.fallback_keys_down.insert(keymap::V);
+                        self.input.fallback_keys_down.insert(keymap::V);
                         if self.bookmark.share_clipboard {
                             logging::event(format_args!(
                                 "Pasted into the PC: {} characters",
@@ -1550,15 +1607,15 @@ impl ActiveSession {
     /// Presses or releases Shift, Ctrl and Alt on the remote side to match.
     fn sync_modifiers(&mut self, now: Modifiers) {
         for (held, was, code) in [
-            (now.shift, self.modifiers.shift, keymap::SHIFT),
-            (now.ctrl, self.modifiers.ctrl, keymap::CTRL),
-            (now.alt, self.modifiers.alt, keymap::ALT),
+            (now.shift, self.input.modifiers.shift, keymap::SHIFT),
+            (now.ctrl, self.input.modifiers.ctrl, keymap::CTRL),
+            (now.alt, self.input.modifiers.alt, keymap::ALT),
         ] {
             if held != was {
                 self.send_key(code, held);
             }
         }
-        self.modifiers = now;
+        self.input.modifiers = now;
     }
 
     /// Asks the server to match the window once its size has settled.

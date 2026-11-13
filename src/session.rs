@@ -26,12 +26,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
 
-/// How long the window must keep a new size before the remote desktop follows.
-const RESIZE_SETTLE: Duration = Duration::from_millis(400);
-
-/// Remote desktop sizes the display-control channel accepts (MS-RDPEDISP 2.2.2.2.1).
-const MIN_SIDE: u16 = 200;
-const MAX_SIDE: u16 = 8192;
+pub mod display;
+pub use display::*;
 
 /// Limit for each step of the connection; the user's own decisions aside.
 const STEP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -186,19 +182,6 @@ pub struct ActiveSession {
     session: Option<Session>,
     screen: Option<Screen>,
     graphics: Option<String>,
-    /// What the main window measures in the desktop's pixels, for the next
-    /// connection and for following it.
-    canvas_px: (u16, u16),
-    /// This computer's screen scale as a percentage, as last seen.
-    screen_scale: u32,
-    /// The scale the PC was last told.
-    sent_scale: u32,
-    /// A size the window settled on, and since when, before it is requested.
-    pending_size: Option<((u16, u16), Instant)>,
-    /// The size last requested, until the server answers with it.
-    requested_size: Option<(u16, u16)>,
-    /// Whether the server can change resolution without reconnecting.
-    display_control: bool,
     /// What the pointer looks like over the remote desktop.
     pointer: PointerLook,
     /// A new picture for the pointer, until there is a frame to load it in.
@@ -238,16 +221,8 @@ pub struct ActiveSession {
     input_state: crate::input::KeyState,
     /// Keys pressed via egui fallback when Wayland is not available.
     fallback_keys_down: HashSet<keymap::Scancode>,
-    /// Windows the session spans, one per screen.
-    screens: usize,
-    /// Each window's drawing area in physical pixels, the main one first.
-    screen_px: Vec<(u16, u16)>,
-    /// Where the PC says each screen lies, left to right.
-    remote_monitors: Vec<RemoteRect>,
-    /// The screen sizes last asked for, until the PC follows them.
-    requested_layout: Option<Vec<(u16, u16)>>,
-    /// Screen sizes that changed, and since when, before they are asked for.
-    pending_layout: Option<(Vec<(u16, u16)>, Instant)>,
+    /// Size, scale, and layout state for the session's displays.
+    pub display: DisplayState,
 }
 
 impl ActiveSession {
@@ -274,12 +249,6 @@ impl ActiveSession {
             session: None,
             screen: None,
             graphics: None,
-            canvas_px: (1280, 720),
-            screen_scale: 100,
-            sent_scale: 100,
-            pending_size: None,
-            requested_size: None,
-            display_control: false,
             pointer: PointerLook::System,
             new_pointer: None,
             modifiers: Modifiers::NONE,
@@ -299,11 +268,7 @@ impl ActiveSession {
             wayland_keys_rx: None,
             input_state: crate::input::KeyState::new(false, share_clipboard),
             fallback_keys_down: HashSet::new(),
-            screens,
-            screen_px: vec![(1280, 720); screens],
-            remote_monitors: Vec::new(),
-            requested_layout: None,
-            pending_layout: None,
+            display: DisplayState::new(screens),
         }
     }
 
@@ -544,8 +509,8 @@ impl ActiveSession {
                     .as_ref()
                     .map(|g| format!(" · {g}"))
                     .unwrap_or_default();
-                let screens = if self.screens > 1 {
-                    tf(" · {} screens", &[&self.screens])
+                let screens = if self.display.screens > 1 {
+                    tf(" · {} screens", &[&self.display.screens])
                 } else {
                     String::new()
                 };
@@ -732,9 +697,9 @@ impl ActiveSession {
         let (host, port) = split_host_port(&target);
         let username = self.username.trim().to_string();
         let (domain, user) = split_domain(&username);
-        let (width, height) = self.wanted_size(self.canvas_px);
+        let (width, height) = self.wanted_size(self.display.canvas_px);
         let scale = self.wanted_scale();
-        self.sent_scale = scale;
+        self.display.sent_scale = scale;
         let color_depth = self.bookmark.color_quality.bits();
         logging::event(format_args!(
             "Display for the PC: scale {scale}% ({}), {color_depth}-bit color, {}{}",
@@ -763,11 +728,12 @@ impl ActiveSession {
             },
         ));
         let password = self.session_password.clone().unwrap_or_default();
-        if let Some(first) = self.screen_px.first_mut() {
-            *first = self.canvas_px;
+        if let Some(first) = self.display.screen_px.first_mut() {
+            *first = self.display.canvas_px;
         }
-        let monitors: Vec<(u16, u16)> = if self.screens > 1 {
-            self.screen_px
+        let monitors: Vec<(u16, u16)> = if self.display.screens > 1 {
+            self.display
+                .screen_px
                 .iter()
                 .map(|&px| self.wanted_size(px))
                 .collect()
@@ -972,10 +938,11 @@ impl ActiveSession {
                 // A PC that answers with another size keeps the request standing,
                 // or it would be asked again and again.
                 if self
+                    .display
                     .requested_size
                     .is_some_and(|(w, h)| w.abs_diff(width) <= 8 && h.abs_diff(height) <= 8)
                 {
-                    self.requested_size = None;
+                    self.display.requested_size = None;
                 }
             }
             EngineEvent::Frame { rect, bgra } => {
@@ -989,7 +956,7 @@ impl ActiveSession {
             }
             EngineEvent::DisplayControlReady => {
                 logging::event("The remote desktop can follow the window's size");
-                self.display_control = true;
+                self.display.display_control = true;
             }
             EngineEvent::Pointer(pointer) => match pointer {
                 RemotePointer::Default => {
@@ -1014,7 +981,7 @@ impl ActiveSession {
                         .collect::<Vec<_>>()
                         .join(", ")
                 ));
-                self.remote_monitors = monitors;
+                self.display.remote_monitors = monitors;
             }
             EngineEvent::ResumeCookie(cookie) => {
                 logging::event("The PC gave a cookie to resume this session after a drop");
@@ -1121,9 +1088,8 @@ impl ActiveSession {
             }
         }
         self.screen = None;
-        self.display_control = false;
-        self.pending_size = None;
-        self.requested_size = None;
+        self.display.display_control = false;
+        self.display.reset();
         self.modifiers = Modifiers::NONE;
         self.remote_copy = None;
         self.microphone_live = false;
@@ -1135,9 +1101,6 @@ impl ActiveSession {
         self.input_state.handle_leave();
         self.fallback_keys_down.clear();
         self.bar_rect = None;
-        self.remote_monitors.clear();
-        self.requested_layout = None;
-        self.pending_layout = None;
     }
 
     fn send(&self, command: Command) {
@@ -1397,8 +1360,8 @@ impl ActiveSession {
     // ── Remote screen ───────────────────────────────────────────────────
 
     fn measure_canvas(&mut self, ui: &Ui) {
-        self.canvas_px = self.measured_px(ui);
-        self.screen_scale = screen_scale(ui.ctx());
+        self.display.canvas_px = self.measured_px(ui);
+        self.display.screen_scale = screen_scale(ui.ctx());
     }
 
     /// What this window measures in the desktop's pixels: its drawing area, or
@@ -1430,18 +1393,16 @@ impl ActiveSession {
     /// The desktop size to ask for: the one set for the PC, or else what a
     /// window measures.
     fn wanted_size(&self, measured: (u16, u16)) -> (u16, u16) {
-        desktop_size(self.bookmark.resolution.fixed_size().unwrap_or(measured))
+        self.display
+            .wanted_size(measured, self.bookmark.resolution.fixed_size())
     }
 
     /// The scale for the PC: the one set for it, or else the automatic one.
     fn wanted_scale(&self) -> u32 {
-        self.bookmark.scale_percent.map_or_else(
-            || {
-                self.bookmark
-                    .resolution
-                    .automatic_scale(self.bookmark.hidpi_full_resolution, self.screen_scale)
-            },
-            u32::from,
+        self.display.wanted_scale(
+            self.bookmark.scale_percent,
+            &self.bookmark.resolution,
+            self.bookmark.hidpi_full_resolution,
         )
     }
 
@@ -1450,7 +1411,7 @@ impl ActiveSession {
     fn remote_screens(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         let mut focus = self.remote_screen(ui, 0);
-        for index in 1..self.screens {
+        for index in 1..self.display.screens {
             let title = tf(
                 "{} · screen {}",
                 &[&self.bookmark.display_title(), &(index + 1)],
@@ -1511,7 +1472,7 @@ impl ActiveSession {
                 logging::event("The PC's clipboard was not taken: the session was not in use");
             }
         }
-        if self.screens > 1 {
+        if self.display.screens > 1 {
             self.follow_layout();
         } else {
             self.follow_canvas();
@@ -1524,12 +1485,12 @@ impl ActiveSession {
     fn remote_screen(&mut self, ui: &mut Ui, index: usize) -> Option<(Modifiers, bool)> {
         let px = self.measured_px(ui);
         if index == 0 {
-            self.canvas_px = px;
+            self.display.canvas_px = px;
             // ponytail: one scale for the whole session, the main window's;
             // screens with different scales would need one per screen here.
-            self.screen_scale = screen_scale(ui.ctx());
+            self.display.screen_scale = screen_scale(ui.ctx());
         }
-        if let Some(slot) = self.screen_px.get_mut(index) {
+        if let Some(slot) = self.display.screen_px.get_mut(index) {
             *slot = px;
         }
 
@@ -1814,15 +1775,7 @@ impl ActiveSession {
     /// The part of the remote desktop window `index` shows.
     fn region(&self, index: usize) -> Option<RemoteRect> {
         let screen = self.screen.as_ref()?;
-        let width = u16::try_from(screen.width).unwrap_or(u16::MAX);
-        let height = u16::try_from(screen.height).unwrap_or(u16::MAX);
-        Some(screen_region(
-            (width, height),
-            &self.remote_monitors,
-            self.requested_layout.as_deref(),
-            self.screens,
-            index,
-        ))
+        self.display.region(index, screen.width, screen.height)
     }
 
     /// Presses or releases Shift, Ctrl and Alt on the remote side to match.
@@ -1841,80 +1794,32 @@ impl ActiveSession {
 
     /// Asks the server to match the window once its size has settled.
     fn follow_canvas(&mut self) {
-        if !self.display_control {
-            return;
-        }
-        let Some(screen) = &self.screen else {
-            return;
-        };
-        let target = self.wanted_size(self.canvas_px);
+        let target = self.wanted_size(self.display.canvas_px);
         let scale = self.wanted_scale();
-        let close_enough = usize::from(target.0).abs_diff(screen.width) <= 8
-            && usize::from(target.1).abs_diff(screen.height) <= 8;
-        if scale == self.sent_scale && (close_enough || self.requested_size == Some(target)) {
-            self.pending_size = None;
-            return;
-        }
-        match self.pending_size {
-            Some((size, since)) if size == target => {
-                if since.elapsed() >= RESIZE_SETTLE {
-                    logging::event(format_args!(
-                        "Asked the PC for {}×{} at {scale}%",
-                        target.0, target.1
-                    ));
-                    self.send(Command::Resize {
-                        width: target.0,
-                        height: target.1,
-                        scale,
-                    });
-                    self.requested_size = Some(target);
-                    self.sent_scale = scale;
-                    self.pending_size = None;
-                }
-            }
-            _ => self.pending_size = Some((target, Instant::now())),
+        let screen_size = self.screen.as_ref().map(|s| (s.width, s.height));
+        if let Some(cmd) = self
+            .display
+            .follow_canvas(screen_size, target, scale, Instant::now())
+        {
+            self.send(cmd);
         }
     }
 
     /// Asks the PC for the screens' sizes once the windows have settled.
     fn follow_layout(&mut self) {
-        if !self.display_control || self.screen.is_none() {
-            return;
-        }
         let target: Vec<(u16, u16)> = self
+            .display
             .screen_px
             .iter()
             .map(|&px| self.wanted_size(px))
             .collect();
         let scale = self.wanted_scale();
-        let close_enough = self.remote_monitors.len() == target.len()
-            && self
-                .remote_monitors
-                .iter()
-                .zip(&target)
-                .all(|(m, &(w, h))| m.width.abs_diff(w) <= 8 && m.height.abs_diff(h) <= 8);
-        if scale == self.sent_scale
-            && (close_enough || self.requested_layout.as_ref() == Some(&target))
+        let has_screen = self.screen.is_some();
+        if let Some(cmd) = self
+            .display
+            .follow_layout(has_screen, target, scale, Instant::now())
         {
-            self.pending_layout = None;
-            return;
-        }
-        match &self.pending_layout {
-            Some((sizes, since)) if *sizes == target => {
-                if since.elapsed() >= RESIZE_SETTLE {
-                    logging::event(format_args!(
-                        "Asked the PC for screens {target:?} at {scale}%"
-                    ));
-                    self.send(Command::Layout {
-                        sizes: target.clone(),
-                        scale,
-                    });
-                    self.requested_layout = Some(target);
-                    self.sent_scale = scale;
-                    self.pending_layout = None;
-                }
-            }
-            _ => self.pending_layout = Some((target, Instant::now())),
+            self.send(cmd);
         }
     }
 
@@ -2085,20 +1990,6 @@ fn scale_percent(pixels_per_point: f32) -> u32 {
     (pixels_per_point * 100.0).round() as u32
 }
 
-fn desktop_size((width, height): (u16, u16)) -> (u16, u16) {
-    (
-        width.clamp(MIN_SIDE, MAX_SIDE) & !1,
-        height.clamp(MIN_SIDE, MAX_SIDE),
-    )
-}
-
-/// Whether a picture fits the window, to within a pixel, with no scroll bars.
-/// Decided here because a bar takes up room: egui asks if the picture fits what
-/// its bars leave, so a picture that came to fit the window would keep them.
-fn fits_window(size: Vec2, room: Vec2) -> bool {
-    size.x < room.x + 1.0 && size.y < room.y + 1.0
-}
-
 /// Scroll bars for a picture that does not fit the window. Returns the space
 /// left for the picture and how far it is scrolled. The wheel stays the PC's.
 fn scroll_bars(ui: &mut Ui, index: usize, size: Vec2) -> (Rect, Vec2) {
@@ -2113,69 +2004,6 @@ fn scroll_bars(ui: &mut Ui, index: usize, size: Vec2) -> (Rect, Vec2) {
             ui.allocate_space(size);
         });
     (output.inner_rect, output.state.offset)
-}
-
-/// How the picture sits in the space it has.
-#[derive(Clone, Copy)]
-enum Placement {
-    /// The desktop follows the window: until the PC catches up, the picture is
-    /// shown at its own size or smaller.
-    Following,
-    /// The desktop's size is fixed: larger or smaller, it fills the window.
-    Fitted,
-    /// At its own size, moved this far along a side that does not fit.
-    Scrolled(Vec2),
-}
-
-/// Where the picture goes: centered along any side that fits, keeping its shape.
-fn picture_rect(area: Rect, size: Vec2, placement: Placement) -> Rect {
-    let fit = (area.width() / size.x).min(area.height() / size.y);
-    let (scale, scrolled) = match placement {
-        Placement::Following => (fit.min(1.0), Vec2::ZERO),
-        Placement::Fitted => (fit, Vec2::ZERO),
-        Placement::Scrolled(by) => (1.0, by),
-    };
-    let shown = size * scale;
-    let start = |low: f32, room: f32, side: f32, by: f32| {
-        if side > room {
-            low - by
-        } else {
-            low + (room - side) / 2.0
-        }
-    };
-    Rect::from_min_size(
-        pos2(
-            start(area.min.x, area.width(), shown.x, scrolled.x),
-            start(area.min.y, area.height(), shown.y, scrolled.y),
-        ),
-        shown,
-    )
-}
-
-/// The pixel of the remote desktop under `pos`, on a picture of `region`
-/// shown at `image`.
-fn remote_point(pos: egui::Pos2, image: Rect, region: RemoteRect) -> Option<(u16, u16)> {
-    if !image.contains(pos) {
-        return None;
-    }
-    let (width, height) = (f32::from(region.width), f32::from(region.height));
-    let x = (pos.x - image.min.x) / image.width() * width;
-    let y = (pos.y - image.min.y) / image.height() * height;
-    Some((
-        region.x.saturating_add(to_u16(x.min(width - 1.0))),
-        region.y.saturating_add(to_u16(y.min(height - 1.0))),
-    ))
-}
-
-/// Where the PC's pointer picture goes for a pointer at `pos`: its hotspot on
-/// that spot, in a picture scaled by `points_per_pixel` like the desktop's.
-fn pointer_rect(
-    pos: egui::Pos2,
-    size: egui::Vec2,
-    hotspot: egui::Vec2,
-    points_per_pixel: f32,
-) -> Rect {
-    Rect::from_min_size(pos - hotspot * points_per_pixel, size * points_per_pixel)
 }
 
 /// What to send for one key event. A release with no press behind it goes
@@ -2200,61 +2028,6 @@ fn strokes_for(
     }
 }
 
-/// Window `index`'s part of a desktop of `size`: where the PC says that
-/// screen lies when it said so for every screen; else the sizes asked for,
-/// side by side, once the desktop has taken them; else equal slices.
-fn screen_region(
-    size: (u16, u16),
-    reported: &[RemoteRect],
-    asked: Option<&[(u16, u16)]>,
-    screens: usize,
-    index: usize,
-) -> RemoteRect {
-    let (width, height) = size;
-    let whole = RemoteRect {
-        x: 0,
-        y: 0,
-        width,
-        height,
-    };
-    if screens <= 1 {
-        return whole;
-    }
-    let fits = |r: &RemoteRect| {
-        u32::from(r.x) + u32::from(r.width) <= u32::from(width)
-            && u32::from(r.y) + u32::from(r.height) <= u32::from(height)
-    };
-    if reported.len() == screens && reported.iter().all(fits) {
-        return reported[index];
-    }
-    if let Some(asked) = asked.filter(|asked| asked.len() == screens) {
-        let total: u32 = asked.iter().map(|&(w, _)| u32::from(w)).sum();
-        if total == u32::from(width) {
-            let x: u32 = asked[..index].iter().map(|&(w, _)| u32::from(w)).sum();
-            let (w, h) = asked[index];
-            return RemoteRect {
-                x: u16::try_from(x).unwrap_or(u16::MAX),
-                y: 0,
-                width: w,
-                height: h.min(height),
-            };
-        }
-    }
-    let count = u16::try_from(screens).unwrap_or(1);
-    let slice = width / count;
-    let x = slice * u16::try_from(index).unwrap_or(0);
-    RemoteRect {
-        x,
-        y: 0,
-        width: if index + 1 == screens {
-            width - x
-        } else {
-            slice
-        },
-        height,
-    }
-}
-
 fn remote_button(button: PointerButton) -> MouseButton {
     match button {
         PointerButton::Primary => MouseButton::Left,
@@ -2263,11 +2036,6 @@ fn remote_button(button: PointerButton) -> MouseButton {
         PointerButton::Extra1 => MouseButton::X1,
         PointerButton::Extra2 => MouseButton::X2,
     }
-}
-
-/// Rounds and clamps to the `u16` range, so the cast cannot wrap.
-fn to_u16(value: f32) -> u16 {
-    value.round().clamp(0.0, f32::from(u16::MAX)) as u16
 }
 
 /// Rounds and clamps to ±240, two wheel notches, so the cast cannot wrap.
@@ -2300,13 +2068,6 @@ mod tests {
     }
 
     #[test]
-    fn the_pointer_picture_lands_on_its_hotspot() {
-        let rect = pointer_rect(pos2(100.0, 50.0), vec2(32.0, 32.0), vec2(4.0, 8.0), 0.5);
-        assert_eq!(rect.min, pos2(98.0, 46.0));
-        assert_eq!(rect.size(), vec2(16.0, 16.0));
-    }
-
-    #[test]
     fn only_a_swallowed_ctrl_v_is_sent_without_its_press() {
         let mut down = HashSet::new();
         assert_eq!(
@@ -2330,51 +2091,6 @@ mod tests {
         assert!(strokes_for(&mut down, keymap::ESCAPE, false, false).is_empty());
         assert!(strokes_for(&mut down, keymap::V, false, false).is_empty());
         assert!(down.is_empty());
-    }
-
-    #[test]
-    fn each_window_shows_its_own_screen() {
-        let rect = |x, width, height| RemoteRect {
-            x,
-            y: 0,
-            width,
-            height,
-        };
-        // One screen: the whole desktop.
-        assert_eq!(
-            screen_region((1280, 720), &[], None, 1, 0),
-            rect(0, 1280, 720)
-        );
-        // As the PC reports them.
-        let reported = [rect(0, 1920, 1080), rect(1920, 1280, 1024)];
-        assert_eq!(
-            screen_region((3200, 1080), &reported, None, 2, 1),
-            rect(1920, 1280, 1024)
-        );
-        // A report that no longer fits the desktop is not trusted.
-        let asked = [(1600, 900), (1600, 900)];
-        assert_eq!(
-            screen_region(
-                (3200, 900),
-                &[rect(0, 1920, 1080), rect(1920, 1920, 1080)],
-                Some(&asked),
-                2,
-                1
-            ),
-            rect(1600, 1600, 900)
-        );
-        // Before the desktop takes the sizes asked for: equal slices.
-        assert_eq!(
-            screen_region((1281, 720), &[], Some(&asked), 2, 1),
-            rect(640, 641, 720)
-        );
-    }
-
-    #[test]
-    fn desktop_sizes_are_even_and_within_limits() {
-        assert_eq!(desktop_size((1217, 821)), (1216, 821));
-        assert_eq!(desktop_size((50, 50)), (200, 200));
-        assert_eq!(desktop_size((9000, 9000)), (8192, 8192));
     }
 
     #[test]
@@ -2459,7 +2175,7 @@ mod tests {
         let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         pc.scale_percent = Some(200);
         let mut view = ActiveSession::new(pc, false);
-        view.screen_scale = 125;
+        view.display.screen_scale = 125;
         assert_eq!(view.wanted_scale(), 200);
         view.bookmark.scale_percent = None;
         assert_eq!(view.wanted_scale(), 125);
@@ -2470,76 +2186,10 @@ mod tests {
         let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         pc.hidpi_full_resolution = false;
         let mut view = ActiveSession::new(pc, false);
-        view.screen_scale = 125;
+        view.display.screen_scale = 125;
         assert_eq!(view.wanted_scale(), 100);
         view.bookmark.scale_percent = Some(150);
         assert_eq!(view.wanted_scale(), 150);
-    }
-
-    #[test]
-    fn the_picture_sits_as_the_options_say() {
-        let area = Rect::from_min_size(pos2(10.0, 20.0), vec2(800.0, 600.0));
-
-        // Following the window: smaller if it must, never larger.
-        let small = picture_rect(area, vec2(400.0, 300.0), Placement::Following);
-        assert_eq!(small.size(), vec2(400.0, 300.0));
-        assert_eq!(small.center(), area.center());
-        assert_eq!(
-            picture_rect(area, vec2(1600.0, 1200.0), Placement::Following),
-            area
-        );
-
-        // A fixed size fills the window either way, keeping its shape.
-        assert_eq!(
-            picture_rect(area, vec2(400.0, 300.0), Placement::Fitted),
-            area
-        );
-        let wide = picture_rect(area, vec2(1600.0, 900.0), Placement::Fitted);
-        assert_eq!(wide.size(), vec2(800.0, 450.0));
-        assert_eq!(wide.center(), area.center());
-
-        // Without fitting: its own size, scrolled only along the side that
-        // does not fit.
-        let scrolled = picture_rect(
-            area,
-            vec2(1600.0, 300.0),
-            Placement::Scrolled(vec2(100.0, 50.0)),
-        );
-        assert_eq!(scrolled.size(), vec2(1600.0, 300.0));
-        assert_eq!(scrolled.min, pos2(10.0 - 100.0, area.center().y - 150.0));
-    }
-
-    #[test]
-    fn a_picture_that_fits_the_window_needs_no_scroll_bars() {
-        let room = vec2(1536.0, 960.0);
-        assert!(fits_window(room, room));
-        assert!(fits_window(vec2(1536.4, 960.4), room));
-        assert!(fits_window(vec2(800.0, 600.0), room));
-        assert!(!fits_window(vec2(1537.0, 960.0), room));
-        assert!(!fits_window(vec2(1536.0, 961.0), room));
-    }
-
-    #[test]
-    fn a_scrolled_picture_still_points_at_the_right_pixel() {
-        let region = RemoteRect {
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1200,
-        };
-        let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 480.0));
-        let image = picture_rect(
-            area,
-            vec2(1536.0, 960.0),
-            Placement::Scrolled(vec2(200.0, 100.0)),
-        );
-        // The window's corner is 200×100 points into the picture, at 1.25
-        // pixels per point.
-        assert_eq!(
-            remote_point(pos2(0.0, 0.0), image, region),
-            Some((250, 125))
-        );
-        assert_eq!(remote_point(pos2(1400.0, 0.0), image, region), None);
     }
 
     #[test]
@@ -2547,16 +2197,22 @@ mod tests {
         let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         pc.resolution = crate::model::ResolutionOption::Fhd1080p;
         let mut view = ActiveSession::new(pc, false);
-        view.display_control = true;
+        view.display.display_control = true;
         view.screen = Some(Screen::new(1920, 1080));
-        view.canvas_px = (800, 600);
+        view.display.canvas_px = (800, 600);
         view.follow_canvas();
-        assert!(view.pending_size.is_none(), "the window does not matter");
+        assert!(
+            view.display.pending_size.is_none(),
+            "the window does not matter"
+        );
 
         // A desktop of another size is asked to take the one set.
         view.screen = Some(Screen::new(1280, 720));
         view.follow_canvas();
-        assert_eq!(view.pending_size.map(|(size, _)| size), Some((1920, 1080)));
+        assert_eq!(
+            view.display.pending_size.map(|(size, _)| size),
+            Some((1920, 1080))
+        );
     }
 
     #[test]
@@ -2564,41 +2220,41 @@ mod tests {
         let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         pc.resolution = crate::model::ResolutionOption::Fhd1080p;
         let mut view = ActiveSession::new(pc, false);
-        view.display_control = true;
-        view.requested_size = Some((1920, 1080));
+        view.display.display_control = true;
+        view.display.requested_size = Some((1920, 1080));
 
         view.handle(EngineEvent::Resized {
             width: 1280,
             height: 720,
         });
         view.follow_canvas();
-        assert!(view.pending_size.is_none(), "already asked");
+        assert!(view.display.pending_size.is_none(), "already asked");
 
         view.handle(EngineEvent::Resized {
             width: 1920,
             height: 1080,
         });
-        assert_eq!(view.requested_size, None);
+        assert_eq!(view.display.requested_size, None);
     }
 
     #[test]
     fn a_new_scale_alone_is_asked_of_the_pc() {
         let pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         let mut view = ActiveSession::new(pc, false);
-        view.display_control = true;
+        view.display.display_control = true;
         view.screen = Some(Screen::new(1280, 720));
-        view.canvas_px = (1280, 720);
+        view.display.canvas_px = (1280, 720);
         view.follow_canvas();
-        assert!(view.pending_size.is_none(), "nothing changed");
+        assert!(view.display.pending_size.is_none(), "nothing changed");
 
-        view.screen_scale = 125;
+        view.display.screen_scale = 125;
         view.follow_canvas();
-        assert_eq!(view.sent_scale, 100, "not before it settles");
-        view.pending_size = Some(((1280, 720), Instant::now() - RESIZE_SETTLE));
+        assert_eq!(view.display.sent_scale, 100, "not before it settles");
+        view.display.pending_size = Some(((1280, 720), Instant::now() - RESIZE_SETTLE));
         view.follow_canvas();
-        assert_eq!(view.sent_scale, 125);
+        assert_eq!(view.display.sent_scale, 125);
         view.follow_canvas();
-        assert!(view.pending_size.is_none(), "asked only once");
+        assert!(view.display.pending_size.is_none(), "asked only once");
     }
 
     #[test]
@@ -2606,20 +2262,20 @@ mod tests {
         let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         pc.screens = 2;
         let mut view = ActiveSession::new(pc, false);
-        view.display_control = true;
+        view.display.display_control = true;
         view.screen = Some(Screen::new(1280, 720));
         let sizes = vec![(640, 720), (640, 720)];
-        view.screen_px = sizes.clone();
-        view.requested_layout = Some(sizes.clone());
+        view.display.screen_px = sizes.clone();
+        view.display.requested_layout = Some(sizes.clone());
         view.follow_layout();
-        assert!(view.pending_layout.is_none(), "nothing changed");
+        assert!(view.display.pending_layout.is_none(), "nothing changed");
 
-        view.screen_scale = 150;
+        view.display.screen_scale = 150;
         view.follow_layout();
-        assert_eq!(view.sent_scale, 100, "not before it settles");
-        view.pending_layout = Some((sizes, Instant::now() - RESIZE_SETTLE));
+        assert_eq!(view.display.sent_scale, 100, "not before it settles");
+        view.display.pending_layout = Some((sizes, Instant::now() - RESIZE_SETTLE));
         view.follow_layout();
-        assert_eq!(view.sent_scale, 150);
+        assert_eq!(view.display.sent_scale, 150);
     }
 
     #[test]

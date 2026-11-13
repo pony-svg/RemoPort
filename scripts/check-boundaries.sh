@@ -14,7 +14,7 @@ if ! TREE_OUTPUT=$(cargo tree -p remoport-rdp -e normal --prefix none --format '
     exit 1
 fi
 
-if ! echo "$TREE_OUTPUT" | grep -q '^remoport-rdp v'; then
+if ! grep -q '^remoport-rdp v' <<< "$TREE_OUTPUT"; then
     echo "ERROR: cargo tree output does not contain remoport-rdp root crate." >&2
     exit 1
 fi

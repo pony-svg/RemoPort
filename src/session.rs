@@ -833,38 +833,41 @@ impl ActiveSession {
                 self.bookmark.gateway.trim()
             ));
         }
-        let mut config =
-            ConnectConfig::new(host.to_string(), user.to_string(), password, trust_store);
-        config.port = port;
-        config.domain = domain.map(str::to_string);
-        config.width = width;
-        config.height = height;
-        config.monitors = monitors;
-        config.scale = scale;
-        config.color_depth = color_depth;
-        config.allow_without_nla = self.bookmark.allow_without_nla;
-        config.timeout = timeout;
-        config.client_name = client_name();
-        config.clipboard = self.bookmark.share_clipboard;
-        config.sound = sound;
-        config.microphone = microphone;
-        config.folders = folders;
-        config.gateway = Some(self.bookmark.gateway.trim().to_string())
-            .filter(|g| !g.is_empty())
-            .map(|address| remoport_rdp::Gateway {
-                address,
-                account: self.gateway_account().map(|user| {
-                    (
-                        user.to_string(),
-                        self.session_gateway_password.clone().unwrap_or_default(),
-                    )
+        self.session = Some(Session::start(ConnectConfig {
+            host: host.to_string(),
+            port,
+            username: user.to_string(),
+            domain: domain.map(str::to_string),
+            password,
+            width,
+            height,
+            monitors,
+            scale,
+            color_depth,
+            allow_without_nla: self.bookmark.allow_without_nla,
+            trust_store,
+            timeout,
+            client_name: client_name(),
+            clipboard: self.bookmark.share_clipboard,
+            sound,
+            microphone,
+            folders,
+            gateway: Some(self.bookmark.gateway.trim().to_string())
+                .filter(|g| !g.is_empty())
+                .map(|address| remoport_rdp::Gateway {
+                    address,
+                    account: self.gateway_account().map(|user| {
+                        (
+                            user.to_string(),
+                            self.session_gateway_password.clone().unwrap_or_default(),
+                        )
+                    }),
                 }),
-            });
-        config.kerberos = self.bookmark.kerberos.then(|| remoport_rdp::Kerberos {
-            kdc: Some(self.bookmark.kdc.trim().to_string()).filter(|k| !k.is_empty()),
-        });
-        config.resume = self.resume.clone();
-        self.session = Some(Session::start(config));
+            kerberos: self.bookmark.kerberos.then(|| remoport_rdp::Kerberos {
+                kdc: Some(self.bookmark.kdc.trim().to_string()).filter(|k| !k.is_empty()),
+            }),
+            resume: self.resume.clone(),
+        }));
         true
     }
 

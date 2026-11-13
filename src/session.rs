@@ -11,13 +11,12 @@ use crate::logging;
 use crate::model::{self, AudioPlaybackMode, DeviceBookmark};
 use crate::theme::Theme;
 use egui::{
-    pos2, vec2, Align2, Color32, ColorImage, Context, Event, FontId, Modifiers, PointerButton,
-    Rect, RichText, Rounding, Sense, TextureHandle, TextureOptions, Ui, Vec2,
+    pos2, vec2, Align2, Color32, Context, Event, FontId, Modifiers, PointerButton, Rect, RichText,
+    Rounding, Sense, Ui, Vec2,
 };
 use remoport_rdp::{
     ClipboardText, Command, ConnectConfig, Error, Event as EngineEvent, IdentityProblem,
-    MouseButton, PointerShape, Rect as RemoteRect, RemotePointer, SharedFolder, SoundInput,
-    SoundOutput, TrustStore,
+    MouseButton, Rect as RemoteRect, SharedFolder, SoundInput, SoundOutput, TrustStore,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +32,9 @@ pub use signin::*;
 pub mod controller;
 pub use controller::*;
 
+pub mod screen;
+pub use screen::*;
+
 /// How near the top edge the pointer brings up the full-screen bar, in points.
 const BAR_EDGE: f32 = 4.0;
 
@@ -40,93 +42,6 @@ const BAR_EDGE: f32 = 4.0;
 const FULLSCREEN_HINT: Duration = Duration::from_secs(5);
 
 const DANGER: Color32 = Color32::from_rgb(0xc4, 0x2b, 0x1c);
-
-/// What the pointer looks like over the remote desktop.
-enum PointerLook {
-    /// This computer's own arrow.
-    System,
-    Hidden,
-    /// The PC's picture, with its size and hotspot in the PC's pixels.
-    Drawn {
-        texture: TextureHandle,
-        size: egui::Vec2,
-        hotspot: egui::Vec2,
-    },
-}
-
-impl PointerLook {
-    fn load(ctx: &Context, shape: &PointerShape) -> Self {
-        let size = [usize::from(shape.width), usize::from(shape.height)];
-        let image = ColorImage::from_rgba_unmultiplied(size, &shape.rgba);
-        Self::Drawn {
-            texture: ctx.load_texture("remote-pointer", image, TextureOptions::LINEAR),
-            size: vec2(f32::from(shape.width), f32::from(shape.height)),
-            hotspot: vec2(f32::from(shape.hotspot_x), f32::from(shape.hotspot_y)),
-        }
-    }
-}
-
-/// The remote desktop as last drawn, in RGBA, and its texture.
-struct Screen {
-    width: usize,
-    height: usize,
-    rgba: Vec<u8>,
-    texture: Option<TextureHandle>,
-}
-
-impl Screen {
-    fn new(width: u16, height: u16) -> Self {
-        let (width, height) = (usize::from(width), usize::from(height));
-        let mut rgba = vec![0; width * height * 4];
-        for pixel in rgba.as_chunks_mut::<4>().0 {
-            pixel[3] = 255;
-        }
-        Self {
-            width,
-            height,
-            rgba,
-            texture: None,
-        }
-    }
-
-    /// Copies a BGRA region from the engine into the screen and its texture.
-    /// A region that does not fit the screen is dropped.
-    fn apply(&mut self, rect: RemoteRect, bgra: &[u8]) {
-        let (x, y) = (usize::from(rect.x), usize::from(rect.y));
-        let (w, h) = (usize::from(rect.width), usize::from(rect.height));
-        if w == 0 || h == 0 || x + w > self.width || y + h > self.height || bgra.len() < w * h * 4 {
-            return;
-        }
-        let region: Vec<u8> = bgra[..w * h * 4]
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .flat_map(|px| [px[2], px[1], px[0], 255])
-            .collect();
-        for row in 0..h {
-            let dst = ((y + row) * self.width + x) * 4;
-            self.rgba[dst..dst + w * 4].copy_from_slice(&region[row * w * 4..(row + 1) * w * 4]);
-        }
-        if let Some(texture) = &mut self.texture {
-            texture.set_partial(
-                [x, y],
-                ColorImage::from_rgba_unmultiplied([w, h], &region),
-                TextureOptions::LINEAR,
-            );
-        }
-    }
-
-    fn texture(&mut self, ctx: &Context) -> &TextureHandle {
-        let (width, height, rgba) = (self.width, self.height, &self.rgba);
-        self.texture.get_or_insert_with(|| {
-            ctx.load_texture(
-                "remote-screen",
-                ColorImage::from_rgba_unmultiplied([width, height], rgba),
-                TextureOptions::LINEAR,
-            )
-        })
-    }
-}
 
 pub struct ActiveSession {
     pub bookmark: DeviceBookmark,
@@ -136,12 +51,7 @@ pub struct ActiveSession {
     saved: bool,
     pub controller: SessionController,
     pub signin: SignInState,
-    screen: Option<Screen>,
-    graphics: Option<String>,
-    /// What the pointer looks like over the remote desktop.
-    pointer: PointerLook,
-    /// A new picture for the pointer, until there is a frame to load it in.
-    new_pointer: Option<PointerShape>,
+    pub screen: ScreenState,
     /// Modifier keys held on the remote side.
     modifiers: Modifiers,
     last_pointer: Option<(u16, u16)>,
@@ -185,10 +95,7 @@ impl ActiveSession {
             saved,
             controller: SessionController::new(),
             signin,
-            screen: None,
-            graphics: None,
-            pointer: PointerLook::System,
-            new_pointer: None,
+            screen: ScreenState::new(),
             modifiers: Modifiers::NONE,
             last_pointer: None,
             remote_copy: None,
@@ -435,10 +342,12 @@ impl ActiveSession {
             Phase::Connected => {
                 let size = self
                     .screen
+                    .screen
                     .as_ref()
                     .map(|s| format!(" · {}×{}", s.width, s.height))
                     .unwrap_or_default();
                 let graphics = self
+                    .screen
                     .graphics
                     .as_ref()
                     .map(|g| format!(" · {g}"))
@@ -810,7 +719,7 @@ impl ActiveSession {
                     },
                     self.bookmark.pc_name
                 ));
-                self.screen = Some(Screen::new(width, height));
+                self.screen.resize(width, height);
                 self.controller.phase = Phase::Connected;
                 // The PC may have Caps Lock on from before. Where this computer
                 // can say what its own lock keys are, that follows at once.
@@ -823,7 +732,7 @@ impl ActiveSession {
             }
             EngineEvent::Resized { width, height } => {
                 logging::event(format_args!("Remote desktop is now {width}×{height}"));
-                self.screen = Some(Screen::new(width, height));
+                self.screen.resize(width, height);
                 // A PC that answers with another size keeps the request standing,
                 // or it would be asked again and again.
                 if self
@@ -835,29 +744,17 @@ impl ActiveSession {
                 }
             }
             EngineEvent::Frame { rect, bgra } => {
-                if let Some(screen) = &mut self.screen {
-                    screen.apply(rect, &bgra);
-                }
+                self.screen.apply_frame(rect, &bgra);
             }
             EngineEvent::Graphics(mode) => {
                 logging::event(format_args!("Graphics: {mode}"));
-                self.graphics = Some(mode);
+                self.screen.graphics = Some(mode);
             }
             EngineEvent::DisplayControlReady => {
                 logging::event("The remote desktop can follow the window's size");
                 self.display.display_control = true;
             }
-            EngineEvent::Pointer(pointer) => match pointer {
-                RemotePointer::Default => {
-                    self.pointer = PointerLook::System;
-                    self.new_pointer = None;
-                }
-                RemotePointer::Hidden => {
-                    self.pointer = PointerLook::Hidden;
-                    self.new_pointer = None;
-                }
-                RemotePointer::Shape(shape) => self.new_pointer = Some(shape),
-            },
+            EngineEvent::Pointer(pointer) => self.screen.set_pointer(pointer),
             EngineEvent::Clipboard(text) => self.remote_copy = Some(text),
             EngineEvent::Microphone(live) => self.microphone_live = live,
             EngineEvent::Monitors(mut monitors) => {
@@ -965,7 +862,7 @@ impl ActiveSession {
 
     fn reset_session(&mut self) {
         self.controller.disconnect();
-        self.screen = None;
+        self.screen.reset();
         self.display.display_control = false;
         self.display.reset();
         self.modifiers = Modifiers::NONE;
@@ -973,8 +870,6 @@ impl ActiveSession {
         self.microphone_live = false;
         self.key_grab = None;
         self.key_grab_tried = false;
-        self.pointer = PointerLook::System;
-        self.new_pointer = None;
         self.wayland_keys_rx = None;
         self.input_state.handle_leave();
         self.fallback_keys_down.clear();
@@ -1396,7 +1291,7 @@ impl ActiveSession {
         ui.painter()
             .rect_filled(rect, Rounding::ZERO, Color32::BLACK);
         let (region, size) = (region?, size?);
-        let screen = self.screen.as_mut()?;
+        let screen = self.screen.screen.as_mut()?;
         let (desktop_width, desktop_height) = (screen.width as f32, screen.height as f32);
         let (width, height) = (f32::from(region.width), f32::from(region.height));
         let placement = if !self.bookmark.fit_to_window {
@@ -1481,15 +1376,13 @@ impl ActiveSession {
                 Color32::from_white_alpha(160),
             );
         }
-        if let Some(shape) = self.new_pointer.take() {
-            self.pointer = PointerLook::load(&ctx, &shape);
-        }
+        self.screen.flush_pointer(&ctx);
         // Drawn here at the pointer's place, so it moves with no delay and
         // looks as the PC wants: an I-beam over text, a hand over a link.
         if response.hovered() || response.dragged() {
             let hover = ctx.input(|i| i.pointer.hover_pos());
             let over_picture = hover.filter(|pos| rect.contains(*pos) && image.contains(*pos));
-            match (&self.pointer, over_picture) {
+            match (&self.screen.pointer, over_picture) {
                 (PointerLook::Hidden, Some(_)) => ctx.set_cursor_icon(egui::CursorIcon::None),
                 (
                     PointerLook::Drawn {
@@ -1650,7 +1543,7 @@ impl ActiveSession {
 
     /// The part of the remote desktop window `index` shows.
     fn region(&self, index: usize) -> Option<RemoteRect> {
-        let screen = self.screen.as_ref()?;
+        let screen = self.screen.screen.as_ref()?;
         self.display.region(index, screen.width, screen.height)
     }
 
@@ -1672,7 +1565,7 @@ impl ActiveSession {
     fn follow_canvas(&mut self) {
         let target = self.wanted_size(self.display.canvas_px);
         let scale = self.wanted_scale();
-        let screen_size = self.screen.as_ref().map(|s| (s.width, s.height));
+        let screen_size = self.screen.screen.as_ref().map(|s| (s.width, s.height));
         if let Some(cmd) = self
             .display
             .follow_canvas(screen_size, target, scale, Instant::now())
@@ -1690,7 +1583,7 @@ impl ActiveSession {
             .map(|&px| self.wanted_size(px))
             .collect();
         let scale = self.wanted_scale();
-        let has_screen = self.screen.is_some();
+        let has_screen = self.screen.screen.is_some();
         if let Some(cmd) = self
             .display
             .follow_layout(has_screen, target, scale, Instant::now())
@@ -1869,50 +1762,6 @@ mod tests {
     }
 
     #[test]
-    fn regions_land_in_place_as_rgba() {
-        let mut screen = Screen::new(4, 3);
-        // A 2×1 BGRA region at (1, 2): blue then red.
-        screen.apply(
-            RemoteRect {
-                x: 1,
-                y: 2,
-                width: 2,
-                height: 1,
-            },
-            &[255, 0, 0, 0, 0, 0, 255, 0],
-        );
-        let at = |x: usize, y: usize| &screen.rgba[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
-        assert_eq!(at(1, 2), &[0, 0, 255, 255]);
-        assert_eq!(at(2, 2), &[255, 0, 0, 255]);
-        assert_eq!(at(0, 0), &[0, 0, 0, 255]);
-    }
-
-    #[test]
-    fn a_region_outside_the_screen_is_dropped() {
-        let mut screen = Screen::new(4, 3);
-        let before = screen.rgba.clone();
-        screen.apply(
-            RemoteRect {
-                x: 3,
-                y: 0,
-                width: 2,
-                height: 1,
-            },
-            &[1; 8],
-        );
-        screen.apply(
-            RemoteRect {
-                x: 0,
-                y: 0,
-                width: 2,
-                height: 2,
-            },
-            &[1; 4],
-        );
-        assert_eq!(screen.rgba, before);
-    }
-
-    #[test]
     fn mouse_buttons_map_to_the_engine() {
         assert_eq!(remote_button(PointerButton::Primary), MouseButton::Left);
         assert_eq!(remote_button(PointerButton::Secondary), MouseButton::Right);
@@ -1973,7 +1822,7 @@ mod tests {
         pc.resolution = crate::model::ResolutionOption::Fhd1080p;
         let mut view = ActiveSession::new(pc, false);
         view.display.display_control = true;
-        view.screen = Some(Screen::new(1920, 1080));
+        view.screen.resize(1920, 1080);
         view.display.canvas_px = (800, 600);
         view.follow_canvas();
         assert!(
@@ -1982,7 +1831,7 @@ mod tests {
         );
 
         // A desktop of another size is asked to take the one set.
-        view.screen = Some(Screen::new(1280, 720));
+        view.screen.resize(1280, 720);
         view.follow_canvas();
         assert_eq!(
             view.display.pending_size.map(|(size, _)| size),
@@ -2017,7 +1866,7 @@ mod tests {
         let pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
         let mut view = ActiveSession::new(pc, false);
         view.display.display_control = true;
-        view.screen = Some(Screen::new(1280, 720));
+        view.screen.resize(1280, 720);
         view.display.canvas_px = (1280, 720);
         view.follow_canvas();
         assert!(view.display.pending_size.is_none(), "nothing changed");
@@ -2038,7 +1887,7 @@ mod tests {
         pc.screens = 2;
         let mut view = ActiveSession::new(pc, false);
         view.display.display_control = true;
-        view.screen = Some(Screen::new(1280, 720));
+        view.screen.resize(1280, 720);
         let sizes = vec![(640, 720), (640, 720)];
         view.display.screen_px = sizes.clone();
         view.display.requested_layout = Some(sizes.clone());

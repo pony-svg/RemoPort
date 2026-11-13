@@ -6,11 +6,11 @@ pub mod screen;
 mod signin;
 
 use super::ActiveSession;
-use crate::i18n::{t, tf};
-use crate::logging;
-use crate::session::controller::{Phase, MAX_RECONNECTS, RECONNECT_TIMEOUT};
-use crate::theme::Theme;
+use crate::ui::i18n::{t, tf};
+use crate::ui::theme::Theme;
 use egui::{Color32, Rect, RichText, Ui};
+use remoport_core::logging;
+use remoport_core::session::controller::{Phase, MAX_RECONNECTS, RECONNECT_TIMEOUT};
 use std::time::{Duration, Instant};
 
 pub use screen::screen_scale;
@@ -111,7 +111,7 @@ pub(super) fn render(
         Phase::Connected => screen::remote_screens(session, ui),
         Phase::Reconnecting { attempt, .. } => reconnecting(session, ui, attempt),
         Phase::Ended(ref reason) => {
-            let text = crate::i18n::end_reason_text(reason);
+            let text = crate::ui::i18n::end_reason_text(reason);
             ended(session, ui, theme, &text);
         }
     }
@@ -131,7 +131,7 @@ fn reconnecting(session: &mut ActiveSession, ui: &mut Ui, attempt: u32) {
         ui.add_space(110.0);
         ui.label(
             RichText::new(tf("Reconnecting to {}…", &[&session.bookmark.pc_name]))
-                .font(crate::fonts::medium(18.0)),
+                .font(crate::ui::fonts::medium(18.0)),
         );
         ui.add_space(6.0);
         ui.label(
@@ -150,7 +150,8 @@ fn reconnecting(session: &mut ActiveSession, ui: &mut Ui, attempt: u32) {
             logging::event("Stopped reconnecting");
             session.reset_session();
             session.forget_session();
-            session.controller.phase = Phase::Ended(crate::session::EndReason::StoppedReconnecting);
+            session.controller.phase =
+                Phase::Ended(remoport_core::session::controller::EndReason::StoppedReconnecting);
         }
     });
 }
@@ -158,7 +159,7 @@ fn reconnecting(session: &mut ActiveSession, ui: &mut Ui, attempt: u32) {
 fn message(ui: &mut Ui, title: &str, detail: &str) {
     ui.vertical_centered(|ui| {
         ui.add_space(110.0);
-        ui.label(RichText::new(title).font(crate::fonts::medium(18.0)));
+        ui.label(RichText::new(title).font(crate::ui::fonts::medium(18.0)));
         ui.add_space(6.0);
         ui.label(RichText::new(detail).weak());
     });
@@ -170,7 +171,7 @@ fn ended(session: &mut ActiveSession, ui: &mut Ui, theme: &Theme, reason: &str) 
         ui.set_max_width(620.0);
         ui.label(
             RichText::new(t("The session ended"))
-                .font(crate::fonts::medium(20.0))
+                .font(crate::ui::fonts::medium(20.0))
                 .color(theme.text_primary),
         );
         ui.add_space(8.0);

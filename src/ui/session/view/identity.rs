@@ -1,12 +1,12 @@
 //! Interactive server certificate verification view.
 
 use super::DANGER;
-use crate::i18n::{t, tf};
-use crate::logging;
-use crate::session::controller::Phase;
-use crate::session::ActiveSession;
-use crate::theme::Theme;
+use crate::ui::i18n::{t, tf};
+use crate::ui::session::ActiveSession;
+use crate::ui::theme::Theme;
 use egui::{Color32, RichText, Rounding, Ui};
+use remoport_core::logging;
+use remoport_core::session::controller::Phase;
 use remoport_rdp::IdentityProblem;
 
 pub(super) fn identity_question(session: &mut ActiveSession, ui: &mut Ui, theme: &Theme) {
@@ -34,7 +34,7 @@ pub(super) fn identity_question(session: &mut ActiveSession, ui: &mut Ui, theme:
         };
         ui.label(
             RichText::new(title)
-                .font(crate::fonts::medium(21.0))
+                .font(crate::ui::fonts::medium(21.0))
                 .color(color),
         );
         ui.add_space(10.0);

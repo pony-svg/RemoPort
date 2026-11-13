@@ -1,27 +1,14 @@
-mod app;
-mod audio;
-mod credentials;
-mod dialogs;
-mod domain;
-mod fonts;
-mod i18n;
-mod icons;
-pub mod input;
-mod key_grab;
-mod keymap;
-mod logging;
-mod ports;
-mod session;
-mod store;
-mod theme;
+mod platform;
+mod ui;
 
-use app::RemoportApp;
 use eframe::egui;
-use ports::PlatformPorts;
+use platform::{audio, keyring, wayland_keys};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use remoport_core::ports::PlatformPorts;
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
+use ui::app::RemoportApp;
 
 /// Application ID: names the desktop entry, icon and metainfo, and lets
 /// Wayland compositors match the window to them.
@@ -37,8 +24,8 @@ struct AppRunner {
 impl AppRunner {
     pub fn new(screenshot_path: Option<PathBuf>) -> Self {
         let ports = PlatformPorts {
-            secrets: Arc::new(credentials::SystemKeyring),
-            keys: Arc::new(key_grab::WaylandKeySource),
+            secrets: Arc::new(keyring::SystemKeyring),
+            keys: Arc::new(wayland_keys::WaylandKeySource),
             audio: Arc::new(audio::CpalAudioFactory),
         };
         Self {
@@ -59,7 +46,7 @@ impl eframe::App for AppRunner {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let display = frame.display_handle().ok().map(|h| h.as_raw());
         let window = frame.window_handle().ok().map(|h| h.as_raw());
-        key_grab::remember_window(display, window);
+        wayland_keys::remember_window(display, window);
         // Draw the application
         self.app.update(ctx);
 
@@ -146,7 +133,7 @@ fn main() -> eframe::Result<()> {
         "Remoport",
         options,
         Box::new(|cc| {
-            fonts::install(&cc.egui_ctx);
+            ui::fonts::install(&cc.egui_ctx);
             // Ctrl +/−/0 belong to the remote session, not to zooming Remoport.
             cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
             Ok(Box::new(AppRunner::new(screenshot_path)))

@@ -1,22 +1,22 @@
-use crate::dialogs::{AddEditPcDialog, AddWorkspaceDialog};
-use crate::domain::{
-    AppStateData, Appearance, DeviceBookmark, NavTab, RemoteAppItem, ResolutionOption, SortOption,
-    ViewMode,
-};
-use crate::fonts;
-use crate::i18n::{resolution_label, t, tf};
-use crate::icons::{self, Icon};
-use crate::logging;
-use crate::ports::PlatformPorts;
-use crate::session::ActiveSession;
-use crate::store::{self, secure_config_dir, state_path, trust_store_path};
-use crate::theme::Theme;
+use crate::ui::dialogs::{AddEditPcDialog, AddWorkspaceDialog};
+use crate::ui::fonts;
+use crate::ui::i18n::{resolution_label, t, tf};
+use crate::ui::icons::{self, Icon};
+use crate::ui::session::ActiveSession;
+use crate::ui::theme::Theme;
 use chrono::Utc;
 use egui::popup::{popup_below_widget, PopupCloseBehavior};
 use egui::{
     pos2, vec2, Align, Align2, Color32, Context, CursorIcon, FontId, Layout, Margin, Painter, Rect,
     Response, RichText, Rounding, Sense, Stroke, Ui,
 };
+use remoport_core::domain::{
+    AppStateData, Appearance, DeviceBookmark, NavTab, RemoteAppItem, ResolutionOption, SortOption,
+    ViewMode,
+};
+use remoport_core::logging;
+use remoport_core::ports::PlatformPorts;
+use remoport_core::store::{self, secure_config_dir, state_path, trust_store_path};
 
 /// Project pages linked from the rail, the header and Settings.
 const REPO_URL: &str = "https://github.com/pony-svg/RemoPort";

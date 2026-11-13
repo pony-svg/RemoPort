@@ -1,9 +1,9 @@
 //! Sign-in form rendered before connecting.
 
 use super::DANGER;
-use crate::i18n::{t, tf};
-use crate::session::ActiveSession;
-use crate::theme::Theme;
+use crate::ui::i18n::{t, tf};
+use crate::ui::session::ActiveSession;
+use crate::ui::theme::Theme;
 use egui::{RichText, Ui};
 
 pub(super) fn sign_in_form(session: &mut ActiveSession, ui: &mut Ui, theme: &Theme) {
@@ -12,7 +12,7 @@ pub(super) fn sign_in_form(session: &mut ActiveSession, ui: &mut Ui, theme: &The
         ui.add_space(70.0);
         ui.label(
             RichText::new(tf("Sign in to {}", &[&session.bookmark.display_title()]))
-                .font(crate::fonts::medium(22.0))
+                .font(crate::ui::fonts::medium(22.0))
                 .color(theme.text_primary),
         );
         ui.label(RichText::new(&session.bookmark.pc_name).color(theme.text_secondary));
@@ -82,7 +82,7 @@ pub(super) fn sign_in_form(session: &mut ActiveSession, ui: &mut Ui, theme: &The
 
         if let Some(error) = session.signin.sign_in_error {
             ui.add_space(8.0);
-            ui.colored_label(DANGER, crate::i18n::sign_in_error_text(error));
+            ui.colored_label(DANGER, crate::ui::i18n::sign_in_error_text(error));
         }
         ui.add_space(16.0);
         submit |= ui

@@ -28,7 +28,6 @@ impl PendingSecret {
     }
 
     /// Creates an already-completed operation with a known outcome.
-    #[cfg(test)]
     #[must_use]
     pub fn resolved(outcome: SecretOutcome) -> Self {
         let (tx, rx) = mpsc::channel();
@@ -100,9 +99,8 @@ pub struct PlatformPorts {
     pub audio: Arc<dyn AudioFactory>,
 }
 
-#[cfg(test)]
 impl PlatformPorts {
-    /// No-op platform implementations suitable for unit tests.
+    /// No-op platform implementations suitable for headless tests.
     #[must_use]
     pub fn disabled() -> Self {
         Self {
@@ -114,10 +112,8 @@ impl PlatformPorts {
 }
 
 /// In-memory no-op secret store for headless tests.
-#[cfg(test)]
 pub struct NoopSecretStore;
 
-#[cfg(test)]
 impl SecretStore for NoopSecretStore {
     fn lookup(&self, _pc: Uuid) -> PendingSecret {
         PendingSecret::resolved(SecretOutcome::Missing)
@@ -132,10 +128,8 @@ impl SecretStore for NoopSecretStore {
     }
 }
 
-#[cfg(test)]
 struct NoopKeySource;
 
-#[cfg(test)]
 impl KeySource for NoopKeySource {
     fn start(
         &self,
@@ -146,10 +140,8 @@ impl KeySource for NoopKeySource {
     }
 }
 
-#[cfg(test)]
 struct NoopAudioFactory;
 
-#[cfg(test)]
 impl AudioFactory for NoopAudioFactory {
     fn sound_output(&self) -> Box<dyn SoundOutput> {
         Box::new(NoopAudio)
@@ -160,17 +152,14 @@ impl AudioFactory for NoopAudioFactory {
     }
 }
 
-#[cfg(test)]
 struct NoopAudio;
 
-#[cfg(test)]
 impl SoundOutput for NoopAudio {
     fn play(&mut self, _rate: u32, _channels: u16, _samples: &[i16]) {}
     fn set_volume(&mut self, _left: f32, _right: f32) {}
     fn stop(&mut self) {}
 }
 
-#[cfg(test)]
 impl SoundInput for NoopAudio {
     fn start(
         &mut self,

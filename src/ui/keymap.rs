@@ -7,7 +7,7 @@
 
 use egui::Key;
 
-pub use crate::input::Scancode;
+pub use remoport_core::session::input::Scancode;
 
 pub const SHIFT: Scancode = (0x2A, false);
 pub const CTRL: Scancode = (0x1D, false);

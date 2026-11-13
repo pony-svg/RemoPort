@@ -1,5 +1,5 @@
-use crate::domain::Appearance;
 use egui::{Color32, Context, RichText, Stroke};
+use remoport_core::domain::Appearance;
 
 pub struct Theme {
     pub appearance: Appearance,

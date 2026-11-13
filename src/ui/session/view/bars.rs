@@ -1,13 +1,13 @@
 //! Top bar and floating full-screen bar for the active session.
 
 use super::{DANGER, FULLSCREEN_HINT};
-use crate::i18n::{t, tf};
-use crate::keymap;
-use crate::logging;
-use crate::session::controller::{Phase, MAX_RECONNECTS};
-use crate::session::ActiveSession;
-use crate::theme::Theme;
+use crate::ui::i18n::{t, tf};
+use crate::ui::keymap;
+use crate::ui::session::ActiveSession;
+use crate::ui::theme::Theme;
 use egui::{pos2, Context, RichText, Ui};
+use remoport_core::logging;
+use remoport_core::session::controller::{Phase, MAX_RECONNECTS};
 use remoport_rdp::Command;
 use std::sync::atomic::Ordering;
 use std::time::Instant;

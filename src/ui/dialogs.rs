@@ -1,10 +1,10 @@
-use crate::domain::{
+use crate::ui::i18n::{resolution_label, t, tf};
+use crate::ui::theme::Theme;
+use egui::{vec2, Align2, Color32, Context, Ui, Window};
+use remoport_core::domain::{
     AudioPlaybackMode, ColorQuality, DeviceBookmark, RedirectedFolder, ResolutionOption,
 };
-use crate::i18n::{resolution_label, t, tf};
-use crate::logging;
-use crate::theme::Theme;
-use egui::{vec2, Align2, Color32, Context, Ui, Window};
+use remoport_core::logging;
 use uuid::Uuid;
 
 /// The display scales offered for a PC, besides the automatic one.
@@ -325,7 +325,7 @@ impl AddEditPcDialog {
             "Automatic ({}%)",
             &[&self.draft.resolution.automatic_scale(
                 self.draft.hidpi_full_resolution,
-                crate::session::screen_scale(ui.ctx()),
+                crate::ui::session::screen_scale(ui.ctx()),
             )],
         );
         egui::ComboBox::from_label(t("Scale"))

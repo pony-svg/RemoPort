@@ -6,18 +6,17 @@ description = "Connect to your remote computers and apps"
 license = "GPL-3.0-or-later"
 
 [workspace]
-members = ["remoport-rdp"]
+members = ["remoport-core", "remoport-rdp"]
 
 [dependencies]
 eframe = "0.28"
 egui = "0.28"
-emath = "0.28"
 image = { version = "0.25", default-features = false, features = ["png"] }
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 zeroize = "1"
+remoport-core = { path = "remoport-core" }
 remoport-rdp = { path = "remoport-rdp" }
 # Remembered passwords live only in the system keyring (Secret Service), and
 # travel to it over an encrypted D-Bus session.

@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::ports::{PendingSecret, SecretOutcome, SecretStore};
+use remoport_core::ports::{PendingSecret, SecretOutcome, SecretStore};
 
 const SERVICE: &str = "app.remoport.Remoport";
 

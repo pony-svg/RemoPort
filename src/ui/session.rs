@@ -4,14 +4,15 @@
 //! follow the window's size, share the clipboard and play sound when this PC
 //! has them, and bring a dropped connection back to the same session.
 
-use crate::domain::{AudioPlaybackMode, DeviceBookmark};
-use crate::i18n::t;
-use crate::keymap;
-use crate::logging;
-use crate::ports::{PhysicalKeyEvent, PhysicalKeyboard, PlatformPorts};
-use crate::store;
-use crate::theme::Theme;
+use crate::ui::i18n::t;
+use crate::ui::keymap;
+use crate::ui::theme::Theme;
 use egui::{Context, Modifiers, Ui};
+use remoport_core::domain::{AudioPlaybackMode, DeviceBookmark};
+use remoport_core::logging;
+use remoport_core::ports::{PhysicalKeyEvent, PhysicalKeyboard, PlatformPorts};
+use remoport_core::session::input::{InputAction, KeyState};
+use remoport_core::store;
 use remoport_rdp::{
     ClipboardText, Command, ConnectConfig, Error, Event as EngineEvent, IdentityProblem,
     Rect as RemoteRect, SharedFolder, TrustStore,
@@ -21,14 +22,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub mod display;
-pub use display::*;
-
-pub mod signin;
-pub use signin::*;
-
-pub mod controller;
 pub use controller::*;
+pub use display::*;
+pub use remoport_core::session::{controller, display, signin};
+pub use signin::*;
 
 pub mod screen;
 pub use screen::*;
@@ -50,7 +47,7 @@ struct SessionInput {
     /// Events from the physical keyboard listener.
     wayland_keys_rx: Option<std::sync::mpsc::Receiver<PhysicalKeyEvent>>,
     /// State machine tracking physical and fallback keys.
-    state: crate::input::KeyState,
+    state: KeyState,
     /// Keys pressed via egui fallback when Wayland is not available.
     fallback_keys_down: HashSet<keymap::Scancode>,
 }
@@ -63,7 +60,7 @@ impl SessionInput {
             key_grab: None,
             key_grab_tried: false,
             wayland_keys_rx: None,
-            state: crate::input::KeyState::new(false, share_clipboard),
+            state: KeyState::new(false, share_clipboard),
             fallback_keys_down: HashSet::new(),
         }
     }
@@ -561,13 +558,13 @@ impl ActiveSession {
 
     fn execute_input_actions(
         &mut self,
-        actions: Vec<crate::input::InputAction>,
+        actions: Vec<InputAction>,
         ctx: &egui::Context,
         fullscreen: bool,
     ) {
         for action in actions {
             match action {
-                crate::input::InputAction::SendKey {
+                InputAction::SendKey {
                     scancode,
                     extended,
                     pressed,
@@ -587,7 +584,7 @@ impl ActiveSession {
                         pressed,
                     });
                 }
-                crate::input::InputAction::Paste(text) => {
+                InputAction::Paste(text) => {
                     if self.bookmark.share_clipboard {
                         logging::event(format_args!(
                             "Pasted into the PC: {} characters",
@@ -602,7 +599,7 @@ impl ActiveSession {
                         });
                     }
                 }
-                crate::input::InputAction::ToggleFullscreen => {
+                InputAction::ToggleFullscreen => {
                     if !fullscreen {
                         self.view.fullscreen_hint_until = Some(Instant::now() + FULLSCREEN_HINT);
                     }
@@ -884,7 +881,7 @@ mod tests {
     #[test]
     fn a_fixed_resolution_ignores_the_window() {
         let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
-        pc.resolution = crate::domain::ResolutionOption::Fhd1080p;
+        pc.resolution = remoport_core::domain::ResolutionOption::Fhd1080p;
         let mut view = ActiveSession::new(pc, false, PlatformPorts::disabled());
         view.display.display_control = true;
         view.screen.resize(1920, 1080);
@@ -907,7 +904,7 @@ mod tests {
     #[test]
     fn a_pc_that_answers_another_size_is_not_asked_again() {
         let mut pc = DeviceBookmark::new("pc.example".into(), String::new(), String::new());
-        pc.resolution = crate::domain::ResolutionOption::Fhd1080p;
+        pc.resolution = remoport_core::domain::ResolutionOption::Fhd1080p;
         let mut view = ActiveSession::new(pc, false, PlatformPorts::disabled());
         view.display.display_control = true;
         view.display.requested_size = Some((1920, 1080));

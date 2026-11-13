@@ -1,15 +1,17 @@
 //! Remote screen rendering: multi-window orchestration, placement, painting, and input collection.
 
 use super::FULLSCREEN_HINT;
-use crate::i18n::{t, tf};
-use crate::keymap;
-use crate::logging;
-use crate::session::display::{fits_window, picture_rect, pointer_rect, remote_point, Placement};
-use crate::session::screen::PointerLook;
-use crate::session::{strokes_for, ActiveSession};
+use crate::ui::i18n::{t, tf};
+use crate::ui::keymap;
+use crate::ui::session::screen::PointerLook;
+use crate::ui::session::{strokes_for, ActiveSession};
 use egui::{
     pos2, vec2, Align2, Color32, Event, FontId, Modifiers, PointerButton, Rect, Response, Rounding,
     Sense, Ui, Vec2,
+};
+use remoport_core::logging;
+use remoport_core::session::display::{
+    fits_window, picture_rect, pointer_rect, remote_point, Placement,
 };
 use remoport_rdp::{ClipboardText, Command, MouseButton, Rect as RemoteRect};
 use std::time::Instant;
@@ -444,7 +446,7 @@ pub fn screen_scale(ctx: &egui::Context) -> u32 {
     scale_percent(ctx.native_pixels_per_point().unwrap_or(1.0))
 }
 
-pub(in crate::session) fn scale_percent(pixels_per_point: f32) -> u32 {
+pub(in crate::ui::session) fn scale_percent(pixels_per_point: f32) -> u32 {
     (pixels_per_point * 100.0).round() as u32
 }
 
@@ -464,7 +466,7 @@ fn scroll_bars(ui: &mut Ui, index: usize, size: Vec2) -> (Rect, Vec2) {
     (output.inner_rect, output.state.offset)
 }
 
-pub(in crate::session) fn remote_button(button: PointerButton) -> MouseButton {
+pub(in crate::ui::session) fn remote_button(button: PointerButton) -> MouseButton {
     match button {
         PointerButton::Primary => MouseButton::Left,
         PointerButton::Secondary => MouseButton::Right,

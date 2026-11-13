@@ -21,8 +21,8 @@ use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::zwp_keyboard
     self, ZwpKeyboardShortcutsInhibitorV1,
 };
 
-use crate::logging;
-use crate::ports::{KeySource, PhysicalKeyEvent, PhysicalKeyboard};
+use remoport_core::logging;
+use remoport_core::ports::{KeySource, PhysicalKeyEvent, PhysicalKeyboard};
 
 /// The main window's Wayland display and surface, as addresses.
 #[derive(Clone, Copy)]
@@ -138,7 +138,7 @@ struct State {
     shared: Shared,
     keyboard: Option<WlKeyboard>,
     locks: Option<(bool, bool)>,
-    repeat: crate::input::RepeatTracker,
+    repeat: remoport_core::session::input::RepeatTracker,
 }
 
 fn run(
@@ -180,7 +180,7 @@ fn run(
         shared,
         keyboard: None,
         locks: None,
-        repeat: crate::input::RepeatTracker::new(),
+        repeat: remoport_core::session::input::RepeatTracker::new(),
     };
 
     while !stop.load(Ordering::Relaxed) {
@@ -395,10 +395,11 @@ mod tests {
 
     #[test]
     fn only_the_keys_egui_drops_are_taken_here() {
-        assert!(crate::input::is_desktop_reserved(125));
-        assert!(crate::input::is_desktop_reserved(126));
-        assert!(crate::input::is_desktop_reserved(127));
-        assert!(!crate::input::is_desktop_reserved(15));
-        assert!(!crate::input::is_desktop_reserved(30));
+        use remoport_core::session::input::is_desktop_reserved;
+        assert!(is_desktop_reserved(125));
+        assert!(is_desktop_reserved(126));
+        assert!(is_desktop_reserved(127));
+        assert!(!is_desktop_reserved(15));
+        assert!(!is_desktop_reserved(30));
     }
 }

@@ -56,9 +56,9 @@ pub fn tf(template: &'static str, args: &[&dyn Display]) -> String {
     out
 }
 
-/// User-facing label for a [`crate::domain::ResolutionOption`].
-pub fn resolution_label(option: &crate::domain::ResolutionOption) -> String {
-    use crate::domain::ResolutionOption;
+/// User-facing label for a [`remoport_core::domain::ResolutionOption`].
+pub fn resolution_label(option: &remoport_core::domain::ResolutionOption) -> String {
+    use remoport_core::domain::ResolutionOption;
     match option {
         ResolutionOption::Native => t("Default for this display").to_string(),
         ResolutionOption::Fhd1080p => "1920 x 1080 (1080p)".to_string(),
@@ -69,8 +69,8 @@ pub fn resolution_label(option: &crate::domain::ResolutionOption) -> String {
 }
 
 /// Localized sign-in rejection message.
-pub fn sign_in_error_text(error: crate::session::SignInError) -> &'static str {
-    use crate::session::SignInError;
+pub fn sign_in_error_text(error: remoport_core::session::signin::SignInError) -> &'static str {
+    use remoport_core::session::signin::SignInError;
     match error {
         SignInError::RefusedSavedPassword => t("The PC refused the saved password. Type it again."),
         SignInError::RefusedCredentials => {
@@ -80,8 +80,8 @@ pub fn sign_in_error_text(error: crate::session::SignInError) -> &'static str {
 }
 
 /// Localized message explaining why a remote session ended.
-pub fn end_reason_text(reason: &crate::session::controller::EndReason) -> String {
-    use crate::session::controller::EndReason;
+pub fn end_reason_text(reason: &remoport_core::session::controller::EndReason) -> String {
+    use remoport_core::session::controller::EndReason;
     match reason {
         EndReason::NoTrustStoreFolder => {
             t("Remoport has no folder to keep trusted certificates in (HOME is not set).")
@@ -113,8 +113,10 @@ pub fn end_reason_text(reason: &crate::session::controller::EndReason) -> String
     }
 }
 
-fn connection_failure_text(failure: &crate::session::controller::ConnectionFailure) -> String {
-    use crate::session::controller::FailureKind;
+fn connection_failure_text(
+    failure: &remoport_core::session::controller::ConnectionFailure,
+) -> String {
+    use remoport_core::session::controller::FailureKind;
     let detail = &failure.detail;
     if !spanish() {
         return capitalize(detail);

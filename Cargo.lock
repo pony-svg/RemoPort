@@ -4885,18 +4885,30 @@ dependencies = [
  "cpal",
  "eframe",
  "egui",
- "emath",
  "image",
  "keyring",
  "nix 0.29.0",
  "raw-window-handle 0.6.2",
+ "remoport-core",
  "remoport-rdp",
- "serde",
  "serde_json",
  "uuid",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols 0.32.13",
+ "zeroize",
+]
+
+[[package]]
+name = "remoport-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "emath",
+ "remoport-rdp",
+ "serde",
+ "serde_json",
+ "uuid",
  "zeroize",
 ]
 

@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use remoport_rdp::{MicrophonePackets, SoundInput, SoundOutput};
 
-use crate::logging;
-use crate::ports::AudioFactory;
+use remoport_core::logging;
+use remoport_core::ports::AudioFactory;
 
 /// Platform audio adapter using `cpal`.
 pub struct CpalAudioFactory;

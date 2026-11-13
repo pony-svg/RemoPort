@@ -5,6 +5,7 @@ mod dialogs;
 mod fonts;
 mod i18n;
 mod icons;
+pub mod input;
 mod key_grab;
 mod keymap;
 mod logging;

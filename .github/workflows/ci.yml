@@ -15,7 +15,7 @@ jobs:
   check:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Sound (cpal/ALSA), the keyring (D-Bus), TLS (OpenSSL) and the window
       # system libraries eframe links.
@@ -40,3 +40,7 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace
+
+      - name: Boundaries
+        run: scripts/check-boundaries.sh
+

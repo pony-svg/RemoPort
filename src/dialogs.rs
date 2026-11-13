@@ -22,71 +22,25 @@ pub struct AddEditPcDialog {
     pub is_open: bool,
     pub is_edit: bool,
     pub active_tab: EditPcTab,
-    pub pc_name: String,
-    pub friendly_name: String,
-    pub group_name: String,
-    pub username: String,
-    pub resolution: ResolutionOption,
-    pub color_quality: ColorQuality,
-    pub fit_to_window: bool,
-    pub screens: u8,
-    pub scale_percent: Option<u16>,
-    pub hidpi_full_resolution: bool,
-    pub audio_playback: AudioPlaybackMode,
-    pub redirect_microphones: bool,
-    pub redirect_cameras: bool,
-    pub share_clipboard: bool,
-    pub redirect_printers: bool,
-    pub redirect_smartcards: bool,
-    pub redirect_webauthn: bool,
-    pub redirected_folders: Vec<RedirectedFolder>,
-    pub allow_without_nla: bool,
-    pub gateway: String,
-    pub gateway_username: String,
-    pub kerberos: bool,
-    pub kdc: String,
+    pub draft: DeviceBookmark,
     pub new_folder_path: String,
     /// Why the folder typed could not be added.
     pub folder_error: Option<String>,
     pub validation_error: Option<String>,
-    /// The PC being edited, so Save keeps what the dialog does not show
-    /// (favorite, last connection, identity). `None` when adding.
-    pub original: Option<DeviceBookmark>,
 }
 
 impl Default for AddEditPcDialog {
     fn default() -> Self {
+        let mut draft = DeviceBookmark::new(String::new(), String::new(), String::new());
+        draft.group_name.clear();
         Self {
             is_open: false,
             is_edit: false,
             active_tab: EditPcTab::General,
-            pc_name: "".to_string(),
-            friendly_name: "".to_string(),
-            group_name: String::new(),
-            username: "".to_string(),
-            resolution: ResolutionOption::Native,
-            color_quality: ColorQuality::High32Bit,
-            fit_to_window: true,
-            screens: 1,
-            scale_percent: None,
-            hidpi_full_resolution: true,
-            audio_playback: AudioPlaybackMode::LocalDevice,
-            redirect_microphones: false,
-            redirect_cameras: false,
-            share_clipboard: false,
-            redirect_printers: false,
-            redirect_smartcards: false,
-            redirect_webauthn: false,
-            redirected_folders: Vec::new(),
-            allow_without_nla: false,
-            gateway: String::new(),
-            gateway_username: String::new(),
-            kerberos: false,
-            kdc: String::new(),
-            new_folder_path: "".to_string(),
+            draft,
+            new_folder_path: String::new(),
             folder_error: None,
             validation_error: None,
-            original: None,
         }
     }
 }
@@ -95,7 +49,7 @@ impl AddEditPcDialog {
     /// Opens an empty dialog for a new PC, starting at `resolution`.
     pub fn open_add(&mut self, resolution: ResolutionOption) {
         *self = Self::default();
-        self.resolution = resolution;
+        self.draft.resolution = resolution;
         self.is_open = true;
         self.is_edit = false;
         logging::event("Add PC dialog opened");
@@ -107,41 +61,16 @@ impl AddEditPcDialog {
             bookmark.display_title(),
             bookmark.pc_name
         ));
+        *self = Self::default();
         self.is_open = true;
         self.is_edit = true;
-        self.active_tab = EditPcTab::General;
-        self.pc_name = bookmark.pc_name.clone();
-        self.friendly_name = bookmark.friendly_name.clone();
+        self.draft = bookmark.clone();
+        self.draft.screens = self.draft.screens.clamp(1, 4);
         // The default group's name is stored in English: left empty here, the
         // field shows it translated, and saving empty keeps it.
-        self.group_name = if bookmark.group_name == "Saved PCs" {
-            String::new()
-        } else {
-            bookmark.group_name.clone()
-        };
-        self.username = bookmark.username.clone();
-        self.resolution = bookmark.resolution;
-        self.color_quality = bookmark.color_quality;
-        self.fit_to_window = bookmark.fit_to_window;
-        self.screens = bookmark.screens.clamp(1, 4);
-        self.scale_percent = bookmark.scale_percent;
-        self.hidpi_full_resolution = bookmark.hidpi_full_resolution;
-        self.audio_playback = bookmark.audio_playback;
-        self.redirect_microphones = bookmark.redirect_microphones;
-        self.redirect_cameras = bookmark.redirect_cameras;
-        self.share_clipboard = bookmark.share_clipboard;
-        self.redirect_printers = bookmark.redirect_printers;
-        self.redirect_smartcards = bookmark.redirect_smartcards;
-        self.redirect_webauthn = bookmark.redirect_webauthn;
-        self.redirected_folders = bookmark.redirected_folders.clone();
-        self.allow_without_nla = bookmark.allow_without_nla;
-        self.gateway = bookmark.gateway.clone();
-        self.gateway_username = bookmark.gateway_username.clone();
-        self.kerberos = bookmark.kerberos;
-        self.kdc = bookmark.kdc.clone();
-        self.original = Some(bookmark.clone());
-        self.validation_error = None;
-        self.folder_error = None;
+        if self.draft.group_name == "Saved PCs" {
+            self.draft.group_name.clear();
+        }
     }
 
     pub fn show(&mut self, ctx: &Context, theme: &Theme, on_save: &mut Option<DeviceBookmark>) {
@@ -201,59 +130,7 @@ impl AddEditPcDialog {
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.add(theme.primary_button(t("Save"))).clicked() {
-                            let kdc_error = remoport_rdp::normalize_kdc_address(&self.kdc).err();
-                            if self.pc_name.trim().is_empty() {
-                                self.validation_error =
-                                    Some(t("PC name cannot be empty").to_string());
-                                logging::event(format_args!(
-                                    "{title}: Save refused, the PC name is empty"
-                                ));
-                            } else if let (true, Some(error)) = (self.kerberos, kdc_error) {
-                                logging::event(format_args!("{title}: Save refused, {error}"));
-                                self.validation_error = Some(capitalize_first(&error.to_string()));
-                            } else {
-                                let fresh = DeviceBookmark::new(
-                                    self.pc_name.trim().to_string(),
-                                    self.friendly_name.trim().to_string(),
-                                    self.group_name.trim().to_string(),
-                                );
-                                let mut bookmark = match &self.original {
-                                    Some(original) => DeviceBookmark {
-                                        pc_name: fresh.pc_name,
-                                        friendly_name: fresh.friendly_name,
-                                        group_name: fresh.group_name,
-                                        ..original.clone()
-                                    },
-                                    None => fresh,
-                                };
-                                bookmark.username = self.username.trim().to_string();
-                                bookmark.resolution = self.resolution;
-                                bookmark.color_quality = self.color_quality;
-                                bookmark.fit_to_window = self.fit_to_window;
-                                bookmark.screens = self.screens;
-                                bookmark.scale_percent = self.scale_percent;
-                                bookmark.hidpi_full_resolution = self.hidpi_full_resolution;
-                                bookmark.audio_playback = self.audio_playback;
-                                bookmark.redirect_microphones = self.redirect_microphones;
-                                bookmark.redirect_cameras = self.redirect_cameras;
-                                bookmark.share_clipboard = self.share_clipboard;
-                                bookmark.redirect_printers = self.redirect_printers;
-                                bookmark.redirect_smartcards = self.redirect_smartcards;
-                                bookmark.redirect_webauthn = self.redirect_webauthn;
-                                bookmark.redirected_folders = self.redirected_folders.clone();
-                                bookmark.allow_without_nla = self.allow_without_nla;
-                                bookmark.gateway = self.gateway.trim().to_string();
-                                bookmark.gateway_username =
-                                    self.gateway_username.trim().to_string();
-                                bookmark.kerberos = self.kerberos;
-                                bookmark.kdc = self.kdc.trim().to_string();
-
-                                logging::event(format_args!(
-                                    "{title}: saved \"{}\" ({}) in group \"{}\"",
-                                    bookmark.display_title(),
-                                    bookmark.pc_name,
-                                    bookmark.group_name
-                                ));
+                            if let Some(bookmark) = self.validate_and_take_draft(title) {
                                 *on_save = Some(bookmark);
                                 close = true;
                             }
@@ -276,6 +153,41 @@ impl AddEditPcDialog {
         self.is_open = is_open && !close;
     }
 
+    fn validate_and_take_draft(&mut self, title: &str) -> Option<DeviceBookmark> {
+        let kdc_error = remoport_rdp::normalize_kdc_address(&self.draft.kdc).err();
+        if self.draft.pc_name.trim().is_empty() {
+            self.validation_error = Some(t("PC name cannot be empty").to_string());
+            logging::event(format_args!("{title}: Save refused, the PC name is empty"));
+            return None;
+        }
+        if let (true, Some(error)) = (self.draft.kerberos, kdc_error) {
+            logging::event(format_args!("{title}: Save refused, {error}"));
+            self.validation_error = Some(capitalize_first(&error.to_string()));
+            return None;
+        }
+        let mut bookmark = self.draft.clone();
+        bookmark.pc_name = bookmark.pc_name.trim().to_string();
+        bookmark.friendly_name = bookmark.friendly_name.trim().to_string();
+        let group = bookmark.group_name.trim();
+        bookmark.group_name = if group.is_empty() {
+            "Saved PCs".to_string()
+        } else {
+            group.to_string()
+        };
+        bookmark.username = bookmark.username.trim().to_string();
+        bookmark.gateway = bookmark.gateway.trim().to_string();
+        bookmark.gateway_username = bookmark.gateway_username.trim().to_string();
+        bookmark.kdc = bookmark.kdc.trim().to_string();
+
+        logging::event(format_args!(
+            "{title}: saved \"{}\" ({}) in group \"{}\"",
+            bookmark.display_title(),
+            bookmark.pc_name,
+            bookmark.group_name
+        ));
+        Some(bookmark)
+    }
+
     fn show_general_tab(&mut self, ui: &mut Ui) {
         egui::Grid::new("edit_pc_general_grid")
             .num_columns(2)
@@ -283,7 +195,7 @@ impl AddEditPcDialog {
             .show(ui, |ui| {
                 ui.label(t("PC name:"));
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.pc_name)
+                    egui::TextEdit::singleline(&mut self.draft.pc_name)
                         .hint_text(t("hostname, IP, or FQDN"))
                         .desired_width(320.0),
                 );
@@ -291,7 +203,7 @@ impl AddEditPcDialog {
 
                 ui.label(t("Friendly name:"));
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.friendly_name)
+                    egui::TextEdit::singleline(&mut self.draft.friendly_name)
                         .hint_text(t("Optional"))
                         .desired_width(320.0),
                 );
@@ -299,7 +211,7 @@ impl AddEditPcDialog {
 
                 ui.label(t("User account:"));
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.username)
+                    egui::TextEdit::singleline(&mut self.draft.username)
                         .hint_text(t("Leave empty to be asked when connecting"))
                         .desired_width(320.0),
                 );
@@ -307,7 +219,7 @@ impl AddEditPcDialog {
 
                 ui.label(t("Group:"));
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.group_name)
+                    egui::TextEdit::singleline(&mut self.draft.group_name)
                         .hint_text(t("Saved PCs"))
                         .desired_width(320.0),
                 );
@@ -315,23 +227,23 @@ impl AddEditPcDialog {
 
                 ui.label("RD Gateway:");
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.gateway)
+                    egui::TextEdit::singleline(&mut self.draft.gateway)
                         .hint_text(t("Optional, e.g. gateway.example.com"))
                         .desired_width(320.0),
                 );
                 ui.end_row();
 
-                if !self.gateway.trim().is_empty() {
+                if !self.draft.gateway.trim().is_empty() {
                     ui.label(t("Gateway account:"));
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.gateway_username)
+                        egui::TextEdit::singleline(&mut self.draft.gateway_username)
                             .hint_text(t("Leave empty to use the PC's account"))
                             .desired_width(320.0),
                     );
                     ui.end_row();
                 }
             });
-        if !self.gateway.trim().is_empty() {
+        if !self.draft.gateway.trim().is_empty() {
             ui.label(
                 egui::RichText::new(t(
                     "The gateway's certificate must come from an authority this computer \
@@ -343,12 +255,12 @@ impl AddEditPcDialog {
         }
 
         ui.add_space(12.0);
-        ui.checkbox(&mut self.kerberos, t("Sign in with Kerberos"));
-        if self.kerberos {
+        ui.checkbox(&mut self.draft.kerberos, t("Sign in with Kerberos"));
+        if self.draft.kerberos {
             ui.horizontal(|ui| {
                 ui.label("KDC:");
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.kdc)
+                    egui::TextEdit::singleline(&mut self.draft.kdc)
                         .hint_text(t("Optional, e.g. dc01.example.com"))
                         .desired_width(280.0),
                 );
@@ -365,7 +277,7 @@ impl AddEditPcDialog {
         }
         ui.add_space(8.0);
         ui.checkbox(
-            &mut self.allow_without_nla,
+            &mut self.draft.allow_without_nla,
             t("Allow signing in without Network Level Authentication"),
         );
         ui.label(
@@ -383,25 +295,25 @@ impl AddEditPcDialog {
         ui.add_space(8.0);
 
         egui::ComboBox::from_label(t("Resolution"))
-            .selected_text(self.resolution.display_label())
+            .selected_text(self.draft.resolution.display_label())
             .show_ui(ui, |ui| {
                 ui.selectable_value(
-                    &mut self.resolution,
+                    &mut self.draft.resolution,
                     ResolutionOption::Native,
                     t("Default for this display"),
                 );
                 ui.selectable_value(
-                    &mut self.resolution,
+                    &mut self.draft.resolution,
                     ResolutionOption::Fhd1080p,
                     "1920 x 1080 (1080p)",
                 );
                 ui.selectable_value(
-                    &mut self.resolution,
+                    &mut self.draft.resolution,
                     ResolutionOption::Qhd1440p,
                     "2560 x 1440 (1440p)",
                 );
                 ui.selectable_value(
-                    &mut self.resolution,
+                    &mut self.draft.resolution,
                     ResolutionOption::Uhd4k,
                     "3840 x 2160 (4K UHD)",
                 );
@@ -411,21 +323,21 @@ impl AddEditPcDialog {
 
         let automatic = tf(
             "Automatic ({}%)",
-            &[&self.resolution.automatic_scale(
-                self.hidpi_full_resolution,
+            &[&self.draft.resolution.automatic_scale(
+                self.draft.hidpi_full_resolution,
                 crate::session::screen_scale(ui.ctx()),
             )],
         );
         egui::ComboBox::from_label(t("Scale"))
-            .selected_text(match self.scale_percent {
+            .selected_text(match self.draft.scale_percent {
                 None => automatic.clone(),
                 Some(percent) => format!("{percent}%"),
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.scale_percent, None, automatic);
+                ui.selectable_value(&mut self.draft.scale_percent, None, automatic);
                 for percent in SCALES {
                     ui.selectable_value(
-                        &mut self.scale_percent,
+                        &mut self.draft.scale_percent,
                         Some(percent),
                         format!("{percent}%"),
                     );
@@ -442,23 +354,23 @@ impl AddEditPcDialog {
         ui.add_space(8.0);
 
         egui::ComboBox::from_label(t("Color quality"))
-            .selected_text(match self.color_quality {
+            .selected_text(match self.draft.color_quality {
                 ColorQuality::High32Bit => t("High (32 bit)"),
                 ColorQuality::Medium16Bit => t("Medium (16 bit)"),
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(
-                    &mut self.color_quality,
+                    &mut self.draft.color_quality,
                     ColorQuality::High32Bit,
                     t("High (32 bit)"),
                 );
                 ui.selectable_value(
-                    &mut self.color_quality,
+                    &mut self.draft.color_quality,
                     ColorQuality::Medium16Bit,
                     t("Medium (16 bit)"),
                 );
             });
-        if self.color_quality == ColorQuality::Medium16Bit {
+        if self.draft.color_quality == ColorQuality::Medium16Bit {
             ui.label(
                 egui::RichText::new(t(
                     "At 16 bit the PC draws without H.264: colors lose depth and video may use \
@@ -470,17 +382,17 @@ impl AddEditPcDialog {
         }
 
         ui.add_space(8.0);
-        ui.checkbox(&mut self.fit_to_window, t("Fit session to window"))
+        ui.checkbox(&mut self.draft.fit_to_window, t("Fit session to window"))
             .on_hover_text(t(
                 "When off, the desktop keeps its full size and the window gets scroll bars.",
             ));
         ui.horizontal(|ui| {
             ui.label(t("Screens:"));
             for count in 1..=4u8 {
-                ui.selectable_value(&mut self.screens, count, count.to_string());
+                ui.selectable_value(&mut self.draft.screens, count, count.to_string());
             }
         });
-        if self.screens > 1 {
+        if self.draft.screens > 1 {
             ui.label(
                 egui::RichText::new(t(
                     "Remoport opens one window per screen. Move each to its screen and press \
@@ -492,9 +404,9 @@ impl AddEditPcDialog {
         }
         // With a fixed resolution there is nothing for it to decide.
         ui.add_enabled(
-            self.resolution.fixed_size().is_none(),
+            self.draft.resolution.fixed_size().is_none(),
             egui::Checkbox::new(
-                &mut self.hidpi_full_resolution,
+                &mut self.draft.hidpi_full_resolution,
                 t("Use full resolution on HiDPI displays"),
             ),
         );
@@ -504,20 +416,20 @@ impl AddEditPcDialog {
         ui.label(t("Audio playback:"));
         ui.horizontal(|ui| {
             ui.radio_value(
-                &mut self.audio_playback,
+                &mut self.draft.audio_playback,
                 AudioPlaybackMode::LocalDevice,
                 t("Play on this device"),
             );
             ui.add_enabled_ui(false, |ui| {
                 ui.radio_value(
-                    &mut self.audio_playback,
+                    &mut self.draft.audio_playback,
                     AudioPlaybackMode::RemotePC,
                     t("Play on remote PC"),
                 )
                 .on_disabled_hover_text(t("Not available yet"));
             });
             ui.radio_value(
-                &mut self.audio_playback,
+                &mut self.draft.audio_playback,
                 AudioPlaybackMode::Disabled,
                 t("Don't play sound"),
             );
@@ -525,7 +437,7 @@ impl AddEditPcDialog {
 
         ui.add_space(10.0);
         ui.label(t("Shared with this PC:"));
-        ui.checkbox(&mut self.share_clipboard, t("Clipboard (text)"));
+        ui.checkbox(&mut self.draft.share_clipboard, t("Clipboard (text)"));
         ui.add(
             egui::Label::new(
                 egui::RichText::new(t(
@@ -538,7 +450,7 @@ impl AddEditPcDialog {
             .wrap(),
         );
         ui.add_space(6.0);
-        ui.checkbox(&mut self.redirect_microphones, t("Microphone"));
+        ui.checkbox(&mut self.draft.redirect_microphones, t("Microphone"));
         ui.add(
             egui::Label::new(
                 egui::RichText::new(t(
@@ -554,10 +466,10 @@ impl AddEditPcDialog {
         // Not built yet: shown off, so nothing suggests they are shared.
         ui.add_enabled_ui(false, |ui| {
             for (label, value) in [
-                (t("Printers"), &mut self.redirect_printers),
-                (t("Smart cards"), &mut self.redirect_smartcards),
-                (t("Cameras"), &mut self.redirect_cameras),
-                (t("WebAuthn / Passkeys"), &mut self.redirect_webauthn),
+                (t("Printers"), &mut self.draft.redirect_printers),
+                (t("Smart cards"), &mut self.draft.redirect_smartcards),
+                (t("Cameras"), &mut self.draft.redirect_cameras),
+                (t("WebAuthn / Passkeys"), &mut self.draft.redirect_webauthn),
             ] {
                 *value = false;
                 ui.checkbox(value, label)
@@ -582,7 +494,7 @@ impl AddEditPcDialog {
                 let path = expand_home(self.new_folder_path.trim());
                 if std::path::Path::new(&path).is_dir() {
                     logging::event(format_args!("Folder added to share: {path}"));
-                    self.redirected_folders.push(RedirectedFolder {
+                    self.draft.redirected_folders.push(RedirectedFolder {
                         id: Uuid::new_v4(),
                         path,
                         writable: false,
@@ -618,13 +530,13 @@ impl AddEditPcDialog {
         egui::ScrollArea::vertical()
             .max_height(140.0)
             .show(ui, |ui| {
-                if self.redirected_folders.is_empty() {
+                if self.draft.redirected_folders.is_empty() {
                     ui.label(
                         egui::RichText::new(t("No folders added yet."))
                             .color(Color32::from_rgb(140, 140, 140)),
                     );
                 } else {
-                    for (i, folder) in self.redirected_folders.iter_mut().enumerate() {
+                    for (i, folder) in self.draft.redirected_folders.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label(format!("📁 {}", folder.path));
                             ui.checkbox(&mut folder.writable, t("Allow changes"));
@@ -637,7 +549,7 @@ impl AddEditPcDialog {
             });
 
         if let Some(idx) = remove_index {
-            self.redirected_folders.remove(idx);
+            self.draft.redirected_folders.remove(idx);
         }
     }
 }
@@ -743,4 +655,48 @@ fn capitalize_first(text: &str) -> String {
         .next()
         .map(|first| first.to_uppercase().chain(chars).collect())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn edit_preserves_unshown_fields_and_defaults_empty_group() {
+        let mut pc = DeviceBookmark::new("  host.example  ".into(), "".into(), "".into());
+        pc.is_favorite = true;
+        pc.last_connected = Some(Utc::now());
+        pc.screens = 2;
+
+        let mut dialog = AddEditPcDialog::default();
+        dialog.open_edit(&pc);
+        assert_eq!(dialog.draft.group_name, "");
+
+        let saved = dialog
+            .validate_and_take_draft("Edit PC")
+            .expect("valid draft");
+        assert_eq!(saved.id, pc.id);
+        assert_eq!(saved.is_favorite, pc.is_favorite);
+        assert_eq!(saved.last_connected, pc.last_connected);
+        assert_eq!(saved.pc_name, "host.example");
+        assert_eq!(saved.group_name, "Saved PCs");
+        assert_eq!(saved.screens, 2);
+    }
+
+    #[test]
+    fn save_rejects_empty_pc_name_or_invalid_kdc() {
+        let mut dialog = AddEditPcDialog::default();
+        dialog.open_add(ResolutionOption::Fhd1080p);
+        assert_eq!(dialog.draft.resolution, ResolutionOption::Fhd1080p);
+        assert!(dialog.validate_and_take_draft("Add PC").is_none());
+        assert!(dialog.validation_error.is_some());
+
+        dialog.draft.pc_name = "server.example".into();
+        dialog.draft.kerberos = true;
+        dialog.draft.kdc = "ftp://invalid".into();
+        dialog.validation_error = None;
+        assert!(dialog.validate_and_take_draft("Add PC").is_none());
+        assert!(dialog.validation_error.is_some());
+    }
 }

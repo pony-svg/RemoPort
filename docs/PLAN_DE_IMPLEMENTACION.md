@@ -100,11 +100,11 @@ comprueba añadiéndolo y quitándolo, sin commit).
 **Objetivo:** que cada tecla llegue al PC por su posición real. Arregla el
 teclado numérico y, si se confirma, AltGr.
 
-**Antes de escribir código, confirmar el diagnóstico.** Pedir al dueño que
-pruebe en el Bloc de notas del PC, con Bloq Num activado, y diga qué sale con
-cada tecla: `.` `*` `+` `-` `/` del numérico, y `@` con AltGr+Q. Lo esperado
-según la lectura del código está en ARQUITECTURA.md, sección P2. Si no
-coincide, se revisa el diagnóstico antes de seguir.
+**Antes de escribir código, confirmar el diagnóstico.** La prueba no bloquea.
+El arreglo envía el código físico de cada tecla, así que lo que egui interprete
+hoy deja de importar, y ninguna respuesta posible cambia lo que hay que
+programar. Sirve de línea base: si no se hace la prueba previa, se anota en el
+informe que no hay línea base externa y se continúa con la implementación.
 
 **Diseño**
 
@@ -124,7 +124,7 @@ coincide, se revisa el diagnóstico antes de seguir.
   `egui::Event::Key` se ignoran. Sin Wayland, o si el listener falla, sigue el
   camino actual por egui y el log lo dice una vez.
 
-**Cinco puntos clave de diseño:**
+**Diez puntos clave de diseño:**
 
 1. **Autorrepetición.** Wayland no envía repeticiones: las genera cada cliente
    con `wl_keyboard.repeat_info` (tasa y retardo, desde la versión 4 de
@@ -144,6 +144,33 @@ coincide, se revisa el diagnóstico antes de seguir.
    (`Box<dyn Fn() + Send + Sync>` que llama a `request_repaint`), creado fuera
    de `key_grab`. `key_grab` no recibe `egui::Context`; así la regla R3 se puede
    cumplir en la fase 4.
+6. **Pegar llega por dos caminos.** La V física llega por el canal del
+   listener; el `Paste` con el texto llega por egui. Son hilos distintos: nada
+   asegura que caigan en el mismo cuadro ni en qué orden. La regla del plan
+   ("la V física espera al `Paste` de egui de ese cuadro") acepta el `Paste`
+   antes o después de la V con un límite de tiempo de 150 ms (tiempo imperceptible
+   para el tipeo humano pero suficiente para absorber la latencia entre hilos
+   y cuadros de la interfaz). Pasado el límite se envía la V sola. Si la V se
+   suelta mientras espera, la suelta sale después de su pulsación, nunca antes.
+7. **Una sola fuente incluye Copiar, Cortar y Pegar.** `Event::Copy`,
+   `Event::Cut` y `Event::Paste` no envían las pulsaciones físicas de C, X o V
+   cuando la fuente Wayland está activa, ya que llegan directamente por el
+   listener físico. El texto de `Paste` se mantiene para emitir `Command::Paste`.
+8. **Entrar y salir con teclas pulsadas.** Al recibir el foco
+   (`wl_keyboard.enter`), las teclas que ya estaban pulsadas no se envían, y
+   su suelta posterior tampoco (evitando que el PC reciba eventos desemparejados).
+   Al perder el foco (`leave`) o cuando la pantalla remota pierde el teclado,
+   se suelta todo lo enviado y la repetición se detiene. `KeyState` en `src/input.rs`
+   es el único dueño del conjunto de teclas pulsadas, tanto para Wayland como
+   para el respaldo por egui.
+9. **El reloj de la repetición.** El bucle del listener Wayland calcula el
+   tiempo de espera de poll con base en el próximo instante de repetición
+   (`RepeatTracker` en `src/input.rs`), generando `WaylandKeyEvent::Repeat`
+   por el canal de eventos para asegurar una cadencia uniforme y precisa.
+10. **Códigos que se parecen.** Se distingue `*` del numérico (evdev 55, `0x37`
+    sin extender) de Impr Pant (evdev 99, `0x37` extendido). Teclas complejas
+    como Pausa (evdev 119) requieren secuencias multibyte no representables en
+    un `Scancode` simple y no producen scancode.
 
 **Puntos delicados**
 

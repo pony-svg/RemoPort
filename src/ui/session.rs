@@ -599,9 +599,9 @@ impl ActiveSession {
                     if self.bookmark.share_clipboard {
                         logging::event(format_args!(
                             "Pasted into the PC: {} characters",
-                            text.chars().count()
+                            text.as_str().chars().count()
                         ));
-                        self.send(Command::Paste(ClipboardText::new(text)));
+                        self.send(Command::Paste(text));
                     } else {
                         self.send(Command::Key {
                             scancode: 0x2F,

@@ -419,6 +419,7 @@ fn collect_screen_input(
                 }
             }
             Event::Paste(text) if focused => {
+                let text = ClipboardText::new(text);
                 if has_physical_keys {
                     let actions = session.input.state.handle_egui_paste(text, Instant::now());
                     session.execute_input_actions(actions, &ctx, fullscreen);
@@ -427,9 +428,9 @@ fn collect_screen_input(
                     if session.bookmark.share_clipboard {
                         logging::event(format_args!(
                             "Pasted into the PC: {} characters",
-                            text.chars().count()
+                            text.as_str().chars().count()
                         ));
-                        session.send(Command::Paste(ClipboardText::new(text)));
+                        session.send(Command::Paste(text));
                     } else {
                         session.send_key(keymap::V, true);
                     }

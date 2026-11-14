@@ -7,6 +7,8 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use remoport_rdp::ClipboardText;
+
 /// A scancode and whether it carries the E0 (extended) prefix.
 pub type Scancode = (u8, bool);
 
@@ -24,7 +26,7 @@ pub enum InputAction {
         pressed: bool,
     },
     /// Paste clipboard text into the remote PC.
-    Paste(String),
+    Paste(ClipboardText),
     /// Local shortcut to toggle full screen (Ctrl+Alt+Enter).
     ToggleFullscreen,
 }
@@ -205,8 +207,8 @@ pub struct KeyState {
     alt_held: bool,
     /// Pending physical V key press waiting for egui Paste.
     pending_v: Option<PendingV>,
-    /// Cached Paste event waiting for physical V.
-    pending_paste: Option<(String, Instant)>,
+    /// Cached Paste event timestamp waiting for physical V.
+    pending_paste: Option<Instant>,
     /// Whether the session window is in full screen mode.
     fullscreen: bool,
     /// Whether clipboard sharing is enabled for this session.
@@ -327,7 +329,7 @@ impl KeyState {
         if evdev == 47 && self.ctrl_held && self.share_clipboard {
             if pressed {
                 // Check if a Paste event arrived just before this V.
-                if let Some((_text, paste_time)) = self.pending_paste.take() {
+                if let Some(paste_time) = self.pending_paste.take() {
                     if now.saturating_duration_since(paste_time) <= PASTE_CORRELATION_TIMEOUT {
                         // The Paste action was already emitted by handle_egui_paste;
                         // swallow this V press so it is not typed into the PC.
@@ -373,20 +375,17 @@ impl KeyState {
     }
 
     /// Processes an egui `Event::Paste(text)` event.
-    pub fn handle_egui_paste(&mut self, text: String, now: Instant) -> Vec<InputAction> {
+    pub fn handle_egui_paste(&mut self, text: ClipboardText, now: Instant) -> Vec<InputAction> {
         let mut actions = Vec::new();
 
         if !self.share_clipboard {
             return actions;
         }
 
-        // If physical V is waiting for this Paste, correlate and emit Paste immediately.
-        if let Some(_pending) = self.pending_v.take() {
-            actions.push(InputAction::Paste(text));
-        } else {
-            // Otherwise store it briefly in case the physical V arrives shortly after.
-            actions.push(InputAction::Paste(text.clone()));
-            self.pending_paste = Some((text, now));
+        actions.push(InputAction::Paste(text));
+        if self.pending_v.take().is_none() {
+            // Store only the timestamp in case physical V arrives shortly after.
+            self.pending_paste = Some(now);
         }
 
         actions
@@ -421,7 +420,7 @@ impl KeyState {
             }
         }
 
-        if let Some((_, paste_time)) = self.pending_paste {
+        if let Some(paste_time) = self.pending_paste {
             if now.saturating_duration_since(paste_time) >= PASTE_CORRELATION_TIMEOUT {
                 self.pending_paste = None;
             }
@@ -655,8 +654,11 @@ mod tests {
 
         // Paste arrives at t0 + 50ms
         let t1 = t0 + Duration::from_millis(50);
-        let actions = state.handle_egui_paste("hello".to_string(), t1);
-        assert_eq!(actions, vec![InputAction::Paste("hello".to_string())]);
+        let actions = state.handle_egui_paste(ClipboardText::new("hello".to_string()), t1);
+        assert_eq!(
+            actions,
+            vec![InputAction::Paste(ClipboardText::new("hello".to_string()))]
+        );
 
         // Tick at t0 + 200ms: no delayed V should be sent
         let t2 = t0 + Duration::from_millis(200);
@@ -673,8 +675,11 @@ mod tests {
         state.handle_physical_key(29, true, t0);
 
         // Paste arrives at t0
-        let actions = state.handle_egui_paste("world".to_string(), t0);
-        assert_eq!(actions, vec![InputAction::Paste("world".to_string())]);
+        let actions = state.handle_egui_paste(ClipboardText::new("world".to_string()), t0);
+        assert_eq!(
+            actions,
+            vec![InputAction::Paste(ClipboardText::new("world".to_string()))]
+        );
 
         // Physical V arrives at t0 + 50ms: swallowed, no SendKey
         let t1 = t0 + Duration::from_millis(50);
@@ -809,10 +814,10 @@ mod tests {
         );
 
         // When egui sends Paste, it only emits InputAction::Paste, never SendKey
-        let paste_actions = state.handle_egui_paste("sample".to_string(), t0);
+        let paste_actions = state.handle_egui_paste(ClipboardText::new("sample".to_string()), t0);
         assert_eq!(
             paste_actions,
-            vec![InputAction::Paste("sample".to_string())]
+            vec![InputAction::Paste(ClipboardText::new("sample".to_string()))]
         );
     }
 
@@ -982,5 +987,33 @@ mod tests {
         tracker.press(42, t0);
         tracker.press(14, t0 + Duration::from_millis(20));
         assert_eq!(tracker.tick(t0 + Duration::from_millis(520)), Some(14));
+    }
+
+    #[test]
+    fn pasted_text_is_never_exposed_in_debug_formatting() {
+        let secret = "super-secret-password-987";
+        let action = InputAction::Paste(ClipboardText::new(secret.to_string()));
+        let action_debug = format!("{action:?}");
+        assert!(
+            !action_debug.contains(secret),
+            "InputAction::Paste Debug must omit clipboard contents: {action_debug}"
+        );
+
+        let mut state = KeyState::new(true, true);
+        let t0 = Instant::now();
+        let actions = state.handle_egui_paste(ClipboardText::new(secret.to_string()), t0);
+        assert!(state.pending_paste.is_some());
+        assert_eq!(actions.len(), 1);
+
+        let state_debug = format!("{state:?}");
+        let actions_debug = format!("{actions:?}");
+        assert!(
+            !state_debug.contains(secret),
+            "KeyState Debug must omit clipboard contents: {state_debug}"
+        );
+        assert!(
+            !actions_debug.contains(secret),
+            "Emitted InputAction Debug must omit clipboard contents: {actions_debug}"
+        );
     }
 }

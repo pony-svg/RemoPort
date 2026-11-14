@@ -1,17 +1,9 @@
-//! The connection sequence, in the order security needs: reach the PC,
-//! negotiate (NLA only, unless allowed per PC), TLS, check the PC's identity,
-//! and only then sign in with CredSSP and finish the RDP handshake.
-//!
-//! The order of the identity check and the sign-in follows RustConn's client
-//! (`rustconn-core`, GPL-3.0-or-later); the checks themselves are Remoport's.
+//! IronRDP connector settings, monitor layout, resume cookie, and virtual channel registration.
 
-use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use std::net::SocketAddr;
+use std::sync::mpsc;
 
-use ironrdp_connector::{
-    BitmapConfig, ClientConnector, Config, ConnectionOutcome, ConnectionResult, ConnectorError,
-    Credentials, DesktopSize, ServerName,
-};
+use ironrdp_connector::{BitmapConfig, ClientConnector, Config, Credentials, DesktopSize};
 use ironrdp_displaycontrol::pdu::{DeviceScaleFactor, MonitorLayoutEntry};
 use ironrdp_pdu::gcc::{self, KeyboardType};
 use ironrdp_pdu::rdp::capability_sets::{
@@ -19,112 +11,19 @@ use ironrdp_pdu::rdp::capability_sets::{
 };
 use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
 use ironrdp_pdu::rdp::session_info::ServerAutoReconnect;
-use ironrdp_svc::SvcMessage;
-use ironrdp_tokio::TokioFramed;
-use ironrdp_tokio::reqwest::ReqwestNetworkClient;
-use tokio::time::timeout;
 
-use crate::channels;
-use crate::channels::clipboard::Clipboard;
-use crate::channels::microphone;
-use crate::error::{is_authentication_failure, is_nla_refusal};
-use crate::identity::{self, Verdict};
-use crate::{
-    ConnectConfig, Error, Event, ResumeCookie, TrustReply, kerberos, keyboard_layout, net,
-};
+use crate::channels::{self, Registered};
+use crate::{ConnectConfig, Event, ResumeCookie, keyboard_layout};
 
-/// How long the user has to decide about a PC's identity.
-const IDENTITY_DECISION: Duration = Duration::from_secs(300);
-
-/// A direct connection or a gateway tunnel, as the rest of the sequence sees it.
-pub(crate) trait Transport:
-    tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync
-{
-}
-impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync> Transport for T {}
-
-pub(crate) type Framed = TokioFramed<ironrdp_tls::TlsStream<Box<dyn Transport>>>;
-
-/// A signed-in connection, ready for the session.
-pub(crate) struct Established {
-    pub framed: Framed,
-    pub result: ConnectionResult,
-    /// The session's side of the clipboard, when it is shared.
-    pub clipboard: Option<Clipboard>,
-    /// Microphone packets for the session to send, when the PC may use it.
-    pub microphone: Option<(
-        tokio::sync::mpsc::Receiver<Vec<SvcMessage>>,
-        Arc<microphone::Delivery>,
-    )>,
-    /// Folders are shared, so their change notices need sending.
-    pub drives: bool,
-}
-
-pub(crate) async fn connect(
+/// Stage 2: builds the `ClientConnector` with display, keyboard, resumption,
+/// and all configured virtual channels.
+pub(crate) fn prepare(
     config: &mut ConnectConfig,
+    client_addr: SocketAddr,
     events: &mpsc::Sender<Event>,
-) -> Result<Established, Error> {
-    let progress = |message: String| {
-        let _ = events.send(Event::Log(message));
-    };
-
-    // 1. Reach the PC, directly or through its RD Gateway.
-    let (stream, client_addr): (Box<dyn Transport>, _) = match &config.destination.gateway {
-        Some(gateway) => {
-            progress(format!(
-                "Opening a tunnel through the RD Gateway {}{}",
-                gateway.address,
-                if gateway.account.is_some() {
-                    ", with its own account"
-                } else {
-                    ""
-                }
-            ));
-            let (tunnel, client_addr) = timeout(
-                config.destination.timeout,
-                crate::gateway::open(gateway, config),
-            )
-            .await
-            .map_err(|_| Error::Timeout("reaching the RD Gateway"))??;
-            progress(format!(
-                "Reached {} through {} (its certificate verified)",
-                config.destination.host, gateway.address
-            ));
-            (Box::new(tunnel), client_addr)
-        }
-        None => {
-            let stream = timeout(
-                config.destination.timeout,
-                net::connect_tcp(&config.destination.host, config.destination.port),
-            )
-            .await
-            .map_err(|_| Error::Timeout("reaching the PC"))?
-            .map_err(|e| {
-                Error::Unreachable(format!(
-                    "{}:{} could not be reached: {e}",
-                    config.destination.host, config.destination.port
-                ))
-            })?;
-            net::tune(&stream);
-            let client_addr = stream
-                .local_addr()
-                .map_err(|e| Error::Unreachable(e.to_string()))?;
-            progress(format!(
-                "Reached {} at {}",
-                config.destination.host,
-                stream
-                    .peer_addr()
-                    .map_or_else(|_| "?".to_string(), |a| a.to_string())
-            ));
-            (Box::new(stream), client_addr)
-        }
-    };
-
-    // 2. The connector and its channels: display control (resizing), the
-    // graphics pipeline, and the clipboard, sound, microphone and folders
-    // when this PC has them.
+) -> (ClientConnector, Registered) {
     let (layout, layout_source) = keyboard_layout::detect_keyboard_layout();
-    progress(format!("Keyboard layout: {layout_source}"));
+    let _ = events.send(Event::Log(format!("Keyboard layout: {layout_source}")));
     let playing = config.sharing.sound.is_some();
     let capturing = config.sharing.microphone.is_some();
     let mut connector = with_resume(
@@ -135,169 +34,13 @@ pub(crate) async fn connect(
         config.credentials.resume.as_ref(),
     );
     if let Some(cookie) = &config.credentials.resume {
-        progress(format!("Resuming session {} of this PC", cookie.logon_id));
+        let _ = events.send(Event::Log(format!(
+            "Resuming session {} of this PC",
+            cookie.logon_id
+        )));
     }
     let registered = channels::register_all(&mut connector, config, events);
-
-    // 3. Negotiate, then switch to TLS.
-    let mut framed = TokioFramed::new(stream);
-    let should_upgrade = timeout(
-        config.destination.timeout,
-        ironrdp_tokio::connect_begin(&mut framed, &mut connector),
-    )
-    .await
-    .map_err(|_| Error::Timeout("negotiating"))?
-    .map_err(|e| negotiation_error(&e, config.security.allow_without_nla))?;
-    let (tls, certificate) = timeout(
-        config.destination.timeout,
-        ironrdp_tls::upgrade(framed.into_inner_no_leftover(), &config.destination.host),
-    )
-    .await
-    .map_err(|_| Error::Timeout("setting up the secure channel"))?
-    .map_err(|e| Error::Protocol(format!("the secure channel could not be set up: {e}")))?;
-    progress("Secure channel up (TLS)".to_string());
-
-    // 4. The PC's identity, before any credential leaves this machine.
-    check_identity(config, &certificate, events).await?;
-
-    // 5. Sign in with CredSSP and finish the handshake.
-    let kerberos = config.credentials.kerberos.as_ref().and_then(|settings| {
-        for note in kerberos::preflight(config) {
-            progress(note);
-        }
-        kerberos::settings(config, settings.kdc.as_deref())
-    });
-    progress(format!(
-        "Signing in (Network Level Authentication, {})",
-        match &kerberos {
-            Some(settings) => format!(
-                "Kerberos, KDC {}",
-                settings
-                    .kdc_proxy_url
-                    .as_ref()
-                    .map_or_else(|| "from krb5.conf".to_string(), ToString::to_string)
-            ),
-            None => "NTLM".to_string(),
-        }
-    ));
-    let server_public_key = ironrdp_tls::extract_tls_server_public_key(&certificate)
-        .map(<[u8]>::to_vec)
-        .unwrap_or_default();
-    let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
-    let mut framed = TokioFramed::new(tls);
-    let mut network = ReqwestNetworkClient::new();
-    // IronRDP can still panic on some unexpected server answers; that ends
-    // this connection, not Remoport.
-    let finalize = std::panic::AssertUnwindSafe(ironrdp_tokio::connect_finalize(
-        upgraded,
-        connector,
-        &mut framed,
-        &mut network,
-        ServerName::new(&config.destination.host),
-        server_public_key,
-        kerberos,
-    ));
-    let outcome = timeout(
-        config.destination.timeout,
-        futures::FutureExt::catch_unwind(finalize),
-    )
-    .await
-    .map_err(|_| Error::Timeout("signing in"))?;
-    match outcome {
-        Ok(Ok(ConnectionOutcome::Connected(result))) => Ok(Established {
-            framed,
-            result,
-            clipboard: registered.clipboard,
-            microphone: registered.microphone,
-            drives: registered.drives,
-        }),
-        Ok(Ok(ConnectionOutcome::Redirected(_))) => Err(Error::BrokerRedirect),
-        Ok(Err(e)) => {
-            let detail = format!("{e} [{:?}]", e.kind());
-            if is_authentication_failure(&detail) {
-                Err(Error::Authentication(e.to_string()))
-            } else {
-                Err(Error::Protocol(format!("the handshake failed: {detail}")))
-            }
-        }
-        Err(_) => Err(Error::Protocol(
-            "the RDP library stopped on an unexpected answer from the PC".to_string(),
-        )),
-    }
-}
-
-async fn check_identity(
-    config: &ConnectConfig,
-    certificate: &x509_cert::Certificate,
-    events: &mpsc::Sender<Event>,
-) -> Result<(), Error> {
-    use x509_cert::der::Encode as _;
-
-    let der = certificate
-        .to_der()
-        .map_err(|e| Error::Protocol(format!("the PC's certificate could not be read: {e}")))?;
-    let chain = identity::chain_check(&der, &config.destination.host);
-    let sha256 = identity::fingerprint(&der);
-    let trusted = config
-        .security
-        .trust_store
-        .trusted(&config.destination.host, config.destination.port);
-    match identity::verdict(&chain, trusted.as_deref(), &sha256) {
-        Verdict::Verified { issuer } => {
-            let _ = events.send(Event::Log(format!(
-                "Identity verified: certificate issued by {issuer}"
-            )));
-            Ok(())
-        }
-        Verdict::Remembered => {
-            let _ = events.send(Event::Log(format!(
-                "Identity: the certificate you trusted for this PC ({sha256})"
-            )));
-            Ok(())
-        }
-        Verdict::Ask(problem) => {
-            let why = chain.err().unwrap_or_default();
-            let info = identity::describe(
-                certificate,
-                &der,
-                &config.destination.host,
-                config.destination.port,
-                why,
-            );
-            let (reply, answer) = tokio::sync::oneshot::channel();
-            events
-                .send(Event::VerifyIdentity {
-                    info: info.clone(),
-                    problem,
-                    reply: TrustReply(reply),
-                })
-                .map_err(|_| Error::IdentityRejected)?;
-            match timeout(IDENTITY_DECISION, answer).await {
-                Ok(Ok(true)) => {
-                    if let Err(e) = config.security.trust_store.remember(&info) {
-                        let _ = events.send(Event::Log(format!(
-                            "The certificate could not be remembered, you will be asked again: {e}"
-                        )));
-                    }
-                    let _ = events.send(Event::Log(format!(
-                        "You trusted this PC's certificate ({})",
-                        info.sha256
-                    )));
-                    Ok(())
-                }
-                _ => Err(Error::IdentityRejected),
-            }
-        }
-    }
-}
-
-fn negotiation_error(error: &ConnectorError, allow_without_nla: bool) -> Error {
-    let detail = format!("{error} [{:?}]", error.kind());
-    if !allow_without_nla && is_nla_refusal(&detail) {
-        Error::NlaUnavailable
-    } else {
-        Error::Protocol(format!("the PC refused the connection: {detail}"))
-    }
+    (connector, registered)
 }
 
 /// The IronRDP connector settings (field by field as in RustConn's client).

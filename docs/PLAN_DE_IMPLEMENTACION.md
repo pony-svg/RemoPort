@@ -201,6 +201,7 @@ informe que no hay línea base externa y se continúa con la implementación.
 - **Modificadoras y bloqueos sin autorrepetición:** `is_repeatable_key` en `remoport-core` excluye Shift (`42`, `54`), Ctrl (`29`, `97`), Alt/AltGr (`56`, `100`), Windows (`125`, `126`) y los bloqueos (`58`, `69`, `70`) en `RepeatTracker::press`, deteniendo también cualquier repetición previa activa.
 - **Texto pegado protegido desde la UI:** `egui::Event::Paste` se envuelve de inmediato en `ClipboardText`, `InputAction::Paste` lleva `ClipboardText` sin copiarlo con `clone()`, y `pending_paste` solo conserva el instante.
 - **Suelta única de la `V` tras pegar:** `KeyState` registra `V` (`0x2F`) como pulsada al emitir `InputAction::Paste` para emitir su suelta exactamente una vez y siempre después: al soltar la `V` o perder el foco, justo detrás del `Paste` si ya se soltó mientras esperaba, o al vencer el límite de 150 ms si no llegó pulsación física.
+- **Cola FIFO tras `Ctrl+V` rápido:** mientras `pending_v` espera `Event::Paste` en `KeyState`, toda tecla física posterior (incluida la suelta de `V` o `Ctrl`) espera en `KeyQueue` (cuyo `Debug` solo expone el conteo) y se procesa en orden al resolverse con el instante de resolución; `handle_leave` la descarta limpiamente y suelta las teclas activas en el PC.
 
 **Terminado cuando:** los cuatro comandos pasan con más de 120 tests,
 `src/key_grab.rs` no nombra `Command`, `Commander` ni `egui`, y el informe

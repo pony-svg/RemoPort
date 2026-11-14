@@ -649,6 +649,12 @@ mod tests {
         for source in [
             include_str!("app.rs"),
             include_str!("dialogs.rs"),
+            include_str!("shell.rs"),
+            include_str!("widgets.rs"),
+            include_str!("pages/apps.rs"),
+            include_str!("pages/devices.rs"),
+            include_str!("pages/favorites.rs"),
+            include_str!("pages/settings.rs"),
             include_str!("session.rs"),
             include_str!("session/view/mod.rs"),
             include_str!("session/view/bars.rs"),

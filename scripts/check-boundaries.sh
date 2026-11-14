@@ -73,4 +73,11 @@ if BAD=$(grep -rn 'i18n' remoport-core/ 2>/dev/null); then
     exit 1
 fi
 
-echo "Boundary checks passed (R1-R6 verified across remoport-rdp, remoport-core, src/ui, src/platform)."
+# UI pages isolation: no file in src/ui/pages/ imports or references another page module
+if BAD=$(grep -rnE 'pages::(favorites|devices|apps|settings)\b|super::(favorites|devices|apps|settings)\b|crate::ui::pages::' src/ui/pages/ 2>/dev/null); then
+    echo "ERROR: Page isolation broken: src/ui/pages/ references another page:" >&2
+    echo "$BAD" >&2
+    exit 1
+fi
+
+echo "Boundary checks passed (R1-R6 and UI page isolation verified across remoport-rdp, remoport-core, src/ui, src/platform)."

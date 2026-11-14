@@ -14,40 +14,37 @@
 //!   credential types print it in `Debug`, so they are never formatted.
 //! - The clipboard is shared, as text, only with the PCs the user allows it:
 //!   the PC gets only what the user pastes into it. See
-//!   [`clipboard`](crate::clipboard).
+//!   [`channels::clipboard`](crate::channels::clipboard).
 //! - The PC's sound can be played here, and the microphone and local folders
 //!   offered to it, each only for the PCs the user allows. The microphone
 //!   runs only while the PC holds it open; a shared folder confines the PC
 //!   to it and is read-only unless the user allows writing. See
-//!   [`microphone`](crate::microphone) and [`drive`](crate::drive). No
-//!   printer, smart card or camera is offered.
+//!   [`channels::microphone`](crate::channels::microphone) and
+//!   [`drive`](crate::drive). No printer, smart card or camera is offered.
 //! - A dropped connection can resume the same session: the PC's cookie for it
 //!   ([`ResumeCookie`]) is wiped when dropped, never printed and never saved.
 //!
 //! Parts follow RustConn's client (`rustconn-core`, by Anton Isaiev,
 //! GPL-3.0-or-later), as noted in each module.
 
-mod clipboard;
+mod channels;
 mod connect;
 mod drive;
 mod error;
 mod gateway;
-mod gfx;
 mod identity;
 mod kerberos;
 mod keyboard_layout;
-mod microphone;
 mod net;
 mod session;
-mod sound;
 
+pub use channels::microphone::{MicrophonePackets, SoundInput};
+pub use channels::sound::SoundOutput;
 pub use error::Error;
 pub use identity::{
     CertificateInfo, IdentityProblem, TrustStore, TrustedServer, fingerprint, write_private,
 };
 pub use kerberos::{KdcAddressError, normalize_kdc_address};
-pub use microphone::{MicrophonePackets, SoundInput};
-pub use sound::SoundOutput;
 
 use std::path::PathBuf;
 use std::sync::mpsc;

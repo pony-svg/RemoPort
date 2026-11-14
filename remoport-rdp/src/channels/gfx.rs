@@ -8,7 +8,8 @@
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineHandler};
+use ironrdp_dvc::DrdynvcClient;
+use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineClient, GraphicsPipelineHandler};
 use ironrdp_egfx::decode::{H264Decoder, OpenH264Decoder};
 use ironrdp_egfx::pdu::{
     CapabilitiesV10Flags, CapabilitiesV81Flags, CapabilitiesV103Flags, CapabilitiesV104Flags,
@@ -31,6 +32,26 @@ impl Handler {
             events,
             undecodable: 0,
         }
+    }
+}
+
+/// Attaches the graphics pipeline dynamic channel when 32-bit GFX is active.
+pub(crate) fn register(
+    drdynvc: DrdynvcClient,
+    color_depth: u32,
+    supported: bool,
+    events: &mpsc::Sender<Event>,
+) -> DrdynvcClient {
+    if supported {
+        let (decoder, decoder_note) = h264_decoder();
+        let _ = events.send(Event::Log(decoder_note));
+        let graphics = GraphicsPipelineClient::new(Box::new(Handler::new(events.clone())), decoder);
+        drdynvc.with_dynamic_channel(graphics)
+    } else {
+        let _ = events.send(Event::Log(format!(
+            "{color_depth}-bit color: the PC draws without the graphics pipeline"
+        )));
+        drdynvc
     }
 }
 

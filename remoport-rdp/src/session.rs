@@ -20,7 +20,7 @@ use ironrdp_tokio::{FramedRead, FramedWrite, single_sequence_step_read, split_to
 use tokio::sync::{mpsc as tokio_mpsc, watch};
 use tokio::time::Instant;
 
-use crate::clipboard::Clipboard;
+use crate::channels::clipboard::Clipboard;
 use crate::connect::Established;
 use crate::{Command, Error, Event, MouseButton, PointerShape, Rect, RemotePointer, ResumeCookie};
 
@@ -241,7 +241,7 @@ fn folder_change_frame(stage: &mut ActiveStage) -> Option<Vec<u8>> {
 async fn next_microphone_packet(
     microphone: &mut Option<(
         tokio_mpsc::Receiver<Vec<ironrdp_svc::SvcMessage>>,
-        Arc<crate::microphone::Delivery>,
+        Arc<crate::channels::microphone::Delivery>,
     )>,
 ) -> Option<Vec<ironrdp_svc::SvcMessage>> {
     match microphone {

@@ -13,8 +13,6 @@ use ironrdp_connector::{
     Credentials, DesktopSize, ServerName,
 };
 use ironrdp_displaycontrol::pdu::{DeviceScaleFactor, MonitorLayoutEntry};
-use ironrdp_dvc::DrdynvcClient;
-use ironrdp_egfx::client::GraphicsPipelineClient;
 use ironrdp_pdu::gcc::{self, KeyboardType};
 use ironrdp_pdu::rdp::capability_sets::{
     BitmapCodecs, MajorPlatformType, client_codecs_capabilities,
@@ -26,12 +24,13 @@ use ironrdp_tokio::TokioFramed;
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
 use tokio::time::timeout;
 
-use crate::clipboard::{self, Clipboard};
+use crate::channels;
+use crate::channels::clipboard::Clipboard;
+use crate::channels::microphone;
 use crate::error::{is_authentication_failure, is_nla_refusal};
 use crate::identity::{self, Verdict};
 use crate::{
-    ConnectConfig, Error, Event, ResumeCookie, TrustReply, drive, gfx, kerberos, keyboard_layout,
-    microphone, net, sound,
+    ConnectConfig, Error, Event, ResumeCookie, TrustReply, kerberos, keyboard_layout, net,
 };
 
 /// How long the user has to decide about a PC's identity.
@@ -126,12 +125,11 @@ pub(crate) async fn connect(
     // when this PC has them.
     let (layout, layout_source) = keyboard_layout::detect_keyboard_layout();
     progress(format!("Keyboard layout: {layout_source}"));
-    let sound = config.sharing.sound.take();
-    let input = config.sharing.microphone.take();
-    let playing = sound.is_some();
+    let playing = config.sharing.sound.is_some();
+    let capturing = config.sharing.microphone.is_some();
     let mut connector = with_resume(
         ClientConnector::new(
-            connector_config(config, layout, playing, input.is_some()),
+            connector_config(config, layout, playing, capturing),
             client_addr,
         ),
         config.credentials.resume.as_ref(),
@@ -139,70 +137,7 @@ pub(crate) async fn connect(
     if let Some(cookie) = &config.credentials.resume {
         progress(format!("Resuming session {} of this PC", cookie.logon_id));
     }
-    let clipboard = config.sharing.clipboard.then(|| {
-        let (channel, clipboard) = clipboard::channel();
-        connector.static_channels.insert(channel);
-        clipboard
-    });
-    if let Some(output) = sound {
-        connector
-            .static_channels
-            .insert(ironrdp_rdpsnd::client::Rdpsnd::new(Box::new(
-                sound::Handler::new(output, events.clone()),
-            )));
-    }
-    // The device channel carries the shared folders, and Windows sends sound
-    // only alongside it; without folders it announces no device.
-    let mut drives = 0;
-    if playing || !config.sharing.folders.is_empty() {
-        let (backend, announced) =
-            drive::DriveBackend::new(&config.sharing.folders, events.clone());
-        drives = announced.len();
-        let mut rdpdr =
-            ironrdp_rdpdr::Rdpdr::new(Box::new(backend), config.destination.client_name.clone());
-        if !announced.is_empty() {
-            rdpdr = rdpdr.with_drives(Some(announced));
-        }
-        connector.static_channels.insert(rdpdr);
-    }
-    progress(format!(
-        "Clipboard {}, sound {}, microphone {}, {drives} shared folder{}",
-        if clipboard.is_some() {
-            "shared (text)"
-        } else {
-            "not shared"
-        },
-        if playing { "played here" } else { "off" },
-        if input.is_some() { "allowed" } else { "off" },
-        if drives == 1 { "" } else { "s" },
-    ));
-    let ready = events.clone();
-    let display_control = ironrdp_displaycontrol::client::DisplayControlClient::new(move |_caps| {
-        let _ = ready.send(Event::DisplayControlReady);
-        Ok(Vec::new())
-    });
-    let mut drdynvc = DrdynvcClient::new().with_dynamic_channel(display_control);
-    if connector.config.support_dyn_vc_gfx_protocol {
-        let (decoder, decoder_note) = gfx::h264_decoder();
-        progress(decoder_note);
-        let graphics =
-            GraphicsPipelineClient::new(Box::new(gfx::Handler::new(events.clone())), decoder);
-        drdynvc = drdynvc.with_dynamic_channel(graphics);
-    } else {
-        progress(format!(
-            "{}-bit color: the PC draws without the graphics pipeline",
-            config.display.color_depth
-        ));
-    }
-    // Microphone packets are sent between the PC's turns, so the channel
-    // queues them for the session.
-    let microphone = input.map(|input| {
-        let (with_microphone, packets, delivery) =
-            microphone::register(std::mem::take(&mut drdynvc), input, events.clone());
-        drdynvc = with_microphone;
-        (packets, delivery)
-    });
-    connector.static_channels.insert(drdynvc);
+    let registered = channels::register_all(&mut connector, config, events);
 
     // 3. Negotiate, then switch to TLS.
     let mut framed = TokioFramed::new(stream);
@@ -272,9 +207,9 @@ pub(crate) async fn connect(
         Ok(Ok(ConnectionOutcome::Connected(result))) => Ok(Established {
             framed,
             result,
-            clipboard,
-            microphone,
-            drives: drives > 0,
+            clipboard: registered.clipboard,
+            microphone: registered.microphone,
+            drives: registered.drives,
         }),
         Ok(Ok(ConnectionOutcome::Redirected(_))) => Err(Error::BrokerRedirect),
         Ok(Err(e)) => {

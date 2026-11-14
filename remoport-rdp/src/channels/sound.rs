@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use ironrdp_connector::ClientConnector;
 use ironrdp_rdpsnd::client::RdpsndClientHandler;
 use ironrdp_rdpsnd::pdu::{AudioFormat, AudioFormatFlags, PitchPdu, VolumePdu, WaveFormat};
 
@@ -89,6 +90,24 @@ impl Handler {
             arrivals: Arrivals::default(),
         }
     }
+}
+
+/// Registers the audio playback static channel when an output sink is given.
+pub(crate) fn register(
+    connector: &mut ClientConnector,
+    output: Option<Box<dyn SoundOutput>>,
+    events: &mpsc::Sender<Event>,
+) -> bool {
+    let Some(output) = output else {
+        return false;
+    };
+    connector
+        .static_channels
+        .insert(ironrdp_rdpsnd::client::Rdpsnd::new(Box::new(Handler::new(
+            output,
+            events.clone(),
+        ))));
+    true
 }
 
 impl std::fmt::Debug for Handler {

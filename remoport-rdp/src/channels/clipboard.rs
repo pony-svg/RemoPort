@@ -17,6 +17,7 @@ use ironrdp_cliprdr::pdu::{
     FileContentsResponse, FormatDataRequest, FormatDataResponse, LockDataId,
     OwnedFormatDataResponse,
 };
+use ironrdp_connector::ClientConnector;
 use ironrdp_session::ActiveStage;
 
 use crate::{ClipboardText, Command, Event};
@@ -131,6 +132,15 @@ pub(crate) fn channel() -> (CliprdrClient, Clipboard) {
         held: None,
     };
     (client, clipboard)
+}
+
+/// Registers the clipboard static channel when sharing is enabled.
+pub(crate) fn register(connector: &mut ClientConnector, enabled: bool) -> Option<Clipboard> {
+    enabled.then(|| {
+        let (client, clipboard) = channel();
+        connector.static_channels.insert(client);
+        clipboard
+    })
 }
 
 /// What the session sends after a round of clipboard signals.

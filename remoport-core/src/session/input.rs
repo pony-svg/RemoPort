@@ -171,6 +171,20 @@ pub fn is_desktop_reserved(evdev: u32) -> bool {
     matches!(evdev, 125..=127)
 }
 
+/// Whether an evdev key should autorepeat when held down.
+/// Modifiers (Shift, Ctrl, Alt/AltGr, Windows) and lock keys never repeat.
+#[must_use]
+pub fn is_repeatable_key(evdev: u32) -> bool {
+    !matches!(
+        evdev,
+        42 | 54      // Left / Right Shift
+            | 29 | 97  // Left / Right Ctrl
+            | 56 | 100 // Left Alt / Right Alt (AltGr)
+            | 125 | 126 // Left / Right Windows
+            | 58 | 69 | 70 // Caps / Num / Scroll Lock
+    )
+}
+
 /// Pending physical 'V' press waiting for an egui paste text event.
 #[derive(Debug, Clone, Copy)]
 struct PendingV {
@@ -492,9 +506,11 @@ impl RepeatTracker {
         }
     }
 
-    /// Key pressed. If repeat is enabled, schedules the first repeat after `delay`.
+    /// Key pressed. If repeat is enabled and the key may repeat, schedules the
+    /// first repeat after `delay`. Pressing a modifier or lock key stops any
+    /// key currently repeating so held chords cannot repeat accidentally.
     pub fn press(&mut self, evdev: u32, now: Instant) {
-        if !self.config.enabled {
+        if !self.config.enabled || !is_repeatable_key(evdev) {
             self.active = None;
             return;
         }
@@ -895,5 +911,76 @@ mod tests {
         let timeout =
             tracker.poll_timeout(t0 + Duration::from_millis(505), Duration::from_millis(50));
         assert_eq!(timeout, Duration::ZERO);
+    }
+
+    fn simulate_hold_700ms(evdev: u32) -> Vec<InputAction> {
+        let mut state = KeyState::new(true, true);
+        let mut tracker = RepeatTracker::new();
+        let t0 = Instant::now();
+
+        let mut actions = state.handle_physical_key(evdev, true, t0);
+        tracker.press(evdev, t0);
+
+        for ms in 1..=700 {
+            let now = t0 + Duration::from_millis(ms);
+            if let Some(repeated) = tracker.tick(now) {
+                actions.extend(state.handle_physical_key(repeated, true, now));
+            }
+        }
+        actions
+    }
+
+    #[test]
+    fn modifiers_and_windows_do_not_repeat_when_held() {
+        let non_repeating = [
+            (42, (0x2A, false)), // Left Shift
+            (54, (0x36, false)), // Right Shift
+            (29, (0x1D, false)), // Left Ctrl
+            (97, (0x1D, true)),  // Right Ctrl
+            (56, (0x38, false)), // Left Alt
+            (100, (0x38, true)), // Right Alt / AltGr
+            (125, (0x5B, true)), // Left Windows
+            (126, (0x5C, true)), // Right Windows
+        ];
+        for (evdev, (scancode, extended)) in non_repeating {
+            let actions = simulate_hold_700ms(evdev);
+            assert_eq!(
+                actions,
+                vec![InputAction::SendKey {
+                    scancode,
+                    extended,
+                    pressed: true,
+                }],
+                "evdev {evdev} should emit exactly one press over 700 ms"
+            );
+        }
+
+        // Lock keys produce neither presses nor repeats over 700 ms.
+        for evdev in [58, 69, 70] {
+            let actions = simulate_hold_700ms(evdev);
+            assert!(
+                actions.is_empty(),
+                "lock key evdev {evdev} should produce no actions over 700 ms"
+            );
+        }
+    }
+
+    #[test]
+    fn pressing_modifier_cuts_active_repeat_but_modified_key_still_repeats() {
+        let mut tracker = RepeatTracker::new();
+        let t0 = Instant::now();
+
+        // Backspace starts repeating, then Shift is pressed: active repeat stops.
+        tracker.press(14, t0);
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(500)), Some(14));
+        tracker.press(42, t0 + Duration::from_millis(510));
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(540)), None);
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(1200)), None);
+
+        // Shift held first, then Backspace pressed: Backspace repeats normally.
+        tracker.clear();
+        tracker.press(42, t0);
+        tracker.press(14, t0 + Duration::from_millis(20));
+        assert_eq!(tracker.tick(t0 + Duration::from_millis(520)), Some(14));
     }
 }

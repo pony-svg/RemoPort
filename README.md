@@ -51,6 +51,13 @@ cargo build --release
 ./target/release/remoport
 ```
 
+To install it for your user, with its launcher in the app menu and its icon in the
+taskbar (`--uninstall` removes it again):
+
+```bash
+scripts/install-local.sh
+```
+
 ## License
 
 Remoport is free software under the **GNU General Public License, version 3 or later**

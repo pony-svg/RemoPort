@@ -37,8 +37,7 @@ cada una.
 6. **Reglas del proyecto que siguen vigentes:** nunca `git push`; comprobar que
    el autor es `pony-svg <233282001+pony-svg@users.noreply.github.com>` antes
    de cada commit; nunca registrar contraseñas, texto escrito o pegado, ni
-   sonido; nunca añadir al repositorio `MECHANICS.md`, `mechanics.json` ni
-   `shots/`; todo texto visible pasa por `t()` o `tf()` con su fila en español.
+   sonido; todo texto visible pasa por `t()` o `tf()` con su fila en español.
 7. **Si el plan está equivocado, se dice.** Si un paso no se puede hacer como
    está escrito, se para, se explica y se propone la alternativa. No se cambia
    de rumbo en silencio.

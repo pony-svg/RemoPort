@@ -4,7 +4,7 @@
 //! source of truth for held keys, correlates physical Ctrl+V with clipboard
 //! paste events, and manages focus and shortcuts.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use remoport_rdp::ClipboardText;
@@ -197,11 +197,37 @@ pub fn is_repeatable_key(evdev: u32) -> bool {
     )
 }
 
-/// Pending physical 'V' press waiting for an egui paste text event.
-#[derive(Debug, Clone, Copy)]
-struct PendingV {
-    press_time: Instant,
-    released: bool,
+/// Physical key event deferred while waiting for a Ctrl+V paste correlation.
+#[derive(Clone, Copy)]
+struct QueuedKey {
+    evdev: u32,
+    pressed: bool,
+}
+
+/// Queue of physical key events held back while a `V` press awaits clipboard text.
+/// `Debug` prints only the length so typed keys (such as a password after pasting)
+/// are never formatted or logged.
+#[derive(Default)]
+struct KeyQueue(VecDeque<QueuedKey>);
+
+impl KeyQueue {
+    fn push(&mut self, evdev: u32, pressed: bool) {
+        self.0.push_back(QueuedKey { evdev, pressed });
+    }
+
+    fn pop_front(&mut self) -> Option<QueuedKey> {
+        self.0.pop_front()
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+impl std::fmt::Debug for KeyQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "KeyQueue({} keys)", self.0.len())
+    }
 }
 
 /// Single owner of keyboard state across physical (Wayland) and egui fallbacks.
@@ -211,12 +237,10 @@ pub struct KeyState {
     held: HashSet<Scancode>,
     /// Keys that were already held down when the window received focus (ignored until release).
     ignored_on_enter: HashSet<u32>,
-    /// State of Ctrl keys (left evdev 29 or right evdev 97).
-    ctrl_held: bool,
-    /// State of Alt keys (left evdev 56 or right evdev 100).
-    alt_held: bool,
-    /// Pending physical V key press waiting for egui Paste.
-    pending_v: Option<PendingV>,
+    /// Press time of a pending physical Ctrl+V waiting for egui Paste.
+    pending_v: Option<Instant>,
+    /// Physical key events queued behind `pending_v`, drained once V resolves.
+    queued: KeyQueue,
     /// Cached Paste event timestamp waiting for physical V.
     pending_paste: Option<Instant>,
     /// Whether the session window is in full screen mode.
@@ -232,9 +256,8 @@ impl KeyState {
         Self {
             held: HashSet::new(),
             ignored_on_enter: HashSet::new(),
-            ctrl_held: false,
-            alt_held: false,
             pending_v: None,
+            queued: KeyQueue::default(),
             pending_paste: None,
             fullscreen,
             share_clipboard,
@@ -260,13 +283,13 @@ impl KeyState {
     }
 
     /// Called when keyboard focus is lost (`wl_keyboard.leave` or session unfocused).
-    /// Releases all keys currently held on the PC.
+    /// Discards any queued keys waiting behind a pending Ctrl+V and releases all
+    /// keys currently held on the PC.
     pub fn handle_leave(&mut self) -> Vec<InputAction> {
         self.ignored_on_enter.clear();
         self.pending_v = None;
+        self.queued.clear();
         self.pending_paste = None;
-        self.ctrl_held = false;
-        self.alt_held = false;
 
         let mut actions = Vec::new();
         for (scancode, extended) in std::mem::take(&mut self.held) {
@@ -288,29 +311,39 @@ impl KeyState {
     ) -> Vec<InputAction> {
         let mut actions = Vec::new();
 
-        // Expire any stale pending Paste or flush pending V if timed out.
+        // Expire any stale pending Paste or flush pending V (and queued keys) if timed out.
         actions.extend(self.flush_pending(now));
 
-        // If the key was already pressed when entering focus, ignore it and its release.
-        if !pressed && self.ignored_on_enter.remove(&evdev) {
-            return actions;
-        }
-        if pressed && self.ignored_on_enter.contains(&evdev) {
+        // While a physical Ctrl+V is waiting for egui Paste, defer every subsequent
+        // physical key event (presses, releases, repeats) in arrival order.
+        if self.pending_v.is_some() {
+            self.queued.push(evdev, pressed);
             return actions;
         }
 
-        // Track Ctrl and Alt for shortcuts and clipboard paste correlation.
-        if matches!(evdev, 29 | 97) {
-            self.ctrl_held = pressed;
+        self.process_physical_key(evdev, pressed, now, &mut actions);
+        actions
+    }
+
+    fn process_physical_key(
+        &mut self,
+        evdev: u32,
+        pressed: bool,
+        now: Instant,
+        actions: &mut Vec<InputAction>,
+    ) {
+        // If the key was already pressed when entering focus, ignore it and its release.
+        if !pressed && self.ignored_on_enter.remove(&evdev) {
+            return;
         }
-        if matches!(evdev, 56 | 100) {
-            self.alt_held = pressed;
+        if pressed && self.ignored_on_enter.contains(&evdev) {
+            return;
         }
 
         // Check local shortcut: Ctrl + Alt + Enter (evdev 28 or 96).
-        if pressed && (evdev == 28 || evdev == 96) && self.ctrl_held && self.alt_held {
+        if pressed && (evdev == 28 || evdev == 96) && self.is_ctrl_held() && self.is_alt_held() {
             actions.push(InputAction::ToggleFullscreen);
-            return actions;
+            return;
         }
 
         // Desktop-reserved keys (Windows, Menu) are ignored in windowed mode.
@@ -327,52 +360,31 @@ impl KeyState {
                     }
                 }
             }
-            return actions;
+            return;
         }
 
         // Map evdev to scancode.
         let Some(code) = scancode_from_evdev(evdev) else {
-            return actions;
+            return;
         };
 
         // Physical 'V' key handling for Ctrl+V paste correlation.
-        if evdev == 47 {
-            if pressed {
-                if self.pending_paste.take().is_some() {
-                    if self.ctrl_held && self.share_clipboard {
-                        // Paste already pressed V on the PC and put V_SCANCODE in `held`;
-                        // swallow the matching physical V press without losing held tracking.
-                        return actions;
-                    }
-                    // Plain 'V' pressed right after an uncorrelated Paste: release the
-                    // Paste's synthetic V before sending this press.
-                    self.release_held_v(&mut actions);
+        if evdev == 47 && pressed {
+            if self.pending_paste.take().is_some() {
+                if self.is_ctrl_held() && self.share_clipboard {
+                    // Paste already pressed V on the PC and put V_SCANCODE in `held`;
+                    // swallow the matching physical V press without losing held tracking.
+                    return;
                 }
-                if self.ctrl_held && self.share_clipboard {
-                    if let Some(pending) = &mut self.pending_v {
-                        if pending.released {
-                            // Released and re-pressed within timeout: flush the completed tap.
-                            self.pending_v = Some(PendingV {
-                                press_time: now,
-                                released: false,
-                            });
-                            actions.push(v_key(true));
-                            actions.push(v_key(false));
-                        }
-                        return actions;
-                    }
-                    // Wait up to PASTE_CORRELATION_TIMEOUT for egui Paste.
-                    self.pending_v = Some(PendingV {
-                        press_time: now,
-                        released: false,
-                    });
-                    return actions;
-                }
-            } else if let Some(pending) = &mut self.pending_v {
-                // V released while waiting for Paste (even if Ctrl was already released).
-                // Do not send release before press.
-                pending.released = true;
-                return actions;
+                // Plain 'V' pressed right after an uncorrelated Paste: release the
+                // Paste's synthetic V before sending this press.
+                self.release_held_v(actions);
+            }
+            if self.is_ctrl_held() && self.share_clipboard {
+                // Wait up to PASTE_CORRELATION_TIMEOUT for egui Paste; subsequent keys
+                // wait in `queued` so Ctrl or anything else cannot overtake this V.
+                self.pending_v = Some(now);
+                return;
             }
         }
 
@@ -391,8 +403,6 @@ impl KeyState {
                 pressed: false,
             });
         }
-
-        actions
     }
 
     /// Processes an egui `Event::Paste(text)` event.
@@ -403,16 +413,11 @@ impl KeyState {
             return actions;
         }
 
-        if let Some(pending) = self.pending_v.take() {
-            // Command::Paste presses V on the PC.
+        if self.pending_v.take().is_some() {
+            // Command::Paste presses V on the PC; release deferred events behind it.
+            self.held.insert(V_SCANCODE);
             actions.push(InputAction::Paste(text));
-            if pending.released {
-                // V already released while waiting: emit release immediately after Paste.
-                actions.push(v_key(false));
-            } else {
-                // V still held down: release it when V is released or on focus leave.
-                self.held.insert(V_SCANCODE);
-            }
+            self.drain_queued(now, &mut actions);
         } else {
             // Close out any prior uncorrelated Paste before pressing V again for this one.
             if self.pending_paste.take().is_some() {
@@ -433,6 +438,17 @@ impl KeyState {
         self.flush_pending(now)
     }
 
+    fn drain_queued(&mut self, now: Instant, actions: &mut Vec<InputAction>) {
+        // Replay deferred events at resolution time `now` so a second Ctrl+V in the
+        // queue receives a full correlation window instead of timing out immediately.
+        while self.pending_v.is_none() {
+            let Some(next) = self.queued.pop_front() else {
+                break;
+            };
+            self.process_physical_key(next.evdev, next.pressed, now, actions);
+        }
+    }
+
     fn release_held_v(&mut self, actions: &mut Vec<InputAction>) {
         if self.held.remove(&V_SCANCODE) {
             actions.push(v_key(false));
@@ -442,15 +458,12 @@ impl KeyState {
     fn flush_pending(&mut self, now: Instant) -> Vec<InputAction> {
         let mut actions = Vec::new();
 
-        if let Some(pending) = self.pending_v {
-            if now.saturating_duration_since(pending.press_time) >= PASTE_CORRELATION_TIMEOUT {
+        if let Some(press_time) = self.pending_v {
+            if now.saturating_duration_since(press_time) >= PASTE_CORRELATION_TIMEOUT {
                 self.pending_v = None;
                 self.held.insert(V_SCANCODE);
                 actions.push(v_key(true));
-                if pending.released {
-                    self.held.remove(&V_SCANCODE);
-                    actions.push(v_key(false));
-                }
+                self.drain_queued(now, &mut actions);
             }
         }
 
@@ -464,6 +477,10 @@ impl KeyState {
         actions
     }
 
+    fn is_ctrl_held(&self) -> bool {
+        self.held.contains(&(0x1D, false)) || self.held.contains(&(0x1D, true))
+    }
+
     /// True if any keys are currently sent as pressed to the PC.
     #[must_use]
     pub fn has_held_keys(&self) -> bool {
@@ -473,7 +490,7 @@ impl KeyState {
     /// Whether either Left Alt or Right Alt is currently held down.
     #[must_use]
     pub fn is_alt_held(&self) -> bool {
-        self.alt_held
+        self.held.contains(&(0x38, false)) || self.held.contains(&(0x38, true))
     }
 }
 
@@ -1251,5 +1268,778 @@ mod tests {
         all.extend(state.handle_leave());
         all.extend(state.tick(t0 + Duration::from_millis(200)));
         assert_v_balanced(&all, 1);
+    }
+
+    #[derive(Clone, Copy)]
+    enum SimInput {
+        Key { evdev: u32, pressed: bool },
+        Paste(&'static str),
+        Leave,
+    }
+
+    fn key_action(evdev: u32, pressed: bool) -> InputAction {
+        let (scancode, extended) = scancode_from_evdev(evdev).expect("mapped scancode");
+        InputAction::SendKey {
+            scancode,
+            extended,
+            pressed,
+        }
+    }
+
+    fn apply_sim_input(
+        state: &mut KeyState,
+        actions: &mut Vec<InputAction>,
+        t0: Instant,
+        ms: u64,
+        input: SimInput,
+    ) {
+        let now = t0 + Duration::from_millis(ms);
+        match input {
+            SimInput::Key { evdev, pressed } => {
+                actions.extend(state.handle_physical_key(evdev, pressed, now));
+            }
+            SimInput::Paste(text) => {
+                actions.extend(state.handle_egui_paste(ClipboardText::new(text.to_string()), now));
+            }
+            SimInput::Leave => {
+                actions.extend(state.handle_leave());
+            }
+        }
+    }
+
+    /// Steps sorted events together with 16 ms frame ticks, matching `screen.rs`:
+    /// frame inputs (`Event::Paste` / `poll_physical_keys`) run before `tick(now)`.
+    fn run_frame_timeline(
+        t0: Instant,
+        events: &[(u64, SimInput)],
+        end_ms: u64,
+    ) -> (KeyState, Vec<InputAction>) {
+        let mut state = KeyState::new(true, true);
+        let mut actions = Vec::new();
+        let mut idx = 0usize;
+        let mut next_tick_ms = 16u64;
+
+        loop {
+            let next_ev_ms = events.get(idx).map(|(ms, _)| *ms);
+            match (next_ev_ms, next_tick_ms <= end_ms) {
+                (Some(ev_ms), true) if ev_ms <= next_tick_ms => {
+                    apply_sim_input(&mut state, &mut actions, t0, ev_ms, events[idx].1);
+                    idx += 1;
+                }
+                (Some(ev_ms), false) => {
+                    apply_sim_input(&mut state, &mut actions, t0, ev_ms, events[idx].1);
+                    idx += 1;
+                }
+                (_, true) => {
+                    actions.extend(state.tick(t0 + Duration::from_millis(next_tick_ms)));
+                    next_tick_ms += 16;
+                }
+                (None, false) => break,
+            }
+        }
+
+        (state, actions)
+    }
+
+    /// Replays PC-bound actions incrementally, rejecting any release without a preceding press.
+    fn apply_pc_actions(
+        pc_held: &mut HashSet<Scancode>,
+        actions: &[InputAction],
+    ) -> (usize, usize) {
+        let ctrl_scancode = scancode_from_evdev(29).expect("ctrl scancode");
+        let mut v_with_ctrl = 0usize;
+        let mut v_without_ctrl = 0usize;
+
+        for action in actions {
+            match action {
+                InputAction::SendKey {
+                    scancode,
+                    extended,
+                    pressed: true,
+                } => {
+                    let key = (*scancode, *extended);
+                    if key == V_SCANCODE {
+                        if pc_held.contains(&ctrl_scancode) {
+                            v_with_ctrl += 1;
+                        } else {
+                            v_without_ctrl += 1;
+                        }
+                    }
+                    pc_held.insert(key);
+                }
+                InputAction::SendKey {
+                    scancode,
+                    extended,
+                    pressed: false,
+                } => {
+                    let key = (*scancode, *extended);
+                    assert!(
+                        pc_held.remove(&key),
+                        "release {key:?} emitted without preceding press"
+                    );
+                }
+                InputAction::Paste(_) => {
+                    assert!(
+                        pc_held.contains(&ctrl_scancode),
+                        "Paste emitted while Ctrl is not held on PC"
+                    );
+                    v_with_ctrl += 1;
+                    pc_held.insert(V_SCANCODE);
+                }
+                InputAction::ToggleFullscreen => {}
+            }
+        }
+
+        (v_with_ctrl, v_without_ctrl)
+    }
+
+    #[test]
+    fn fast_ctrl_v_without_text_keeps_ctrl_held_around_v() {
+        let t0 = Instant::now();
+        let (state, actions) = run_frame_timeline(
+            t0,
+            &[
+                (
+                    0,
+                    SimInput::Key {
+                        evdev: 29,
+                        pressed: true,
+                    },
+                ),
+                (
+                    5,
+                    SimInput::Key {
+                        evdev: 47,
+                        pressed: true,
+                    },
+                ),
+                (
+                    85,
+                    SimInput::Key {
+                        evdev: 47,
+                        pressed: false,
+                    },
+                ),
+                (
+                    130,
+                    SimInput::Key {
+                        evdev: 29,
+                        pressed: false,
+                    },
+                ),
+            ],
+            200,
+        );
+        assert_eq!(
+            actions,
+            vec![
+                key_action(29, true),
+                key_action(47, true),
+                key_action(47, false),
+                key_action(29, false),
+            ]
+        );
+        assert!(!state.has_held_keys());
+    }
+
+    #[test]
+    fn delayed_paste_after_ctrl_release_precedes_ctrl_up_with_single_v_release() {
+        let t0 = Instant::now();
+        let (state, actions) = run_frame_timeline(
+            t0,
+            &[
+                (
+                    0,
+                    SimInput::Key {
+                        evdev: 29,
+                        pressed: true,
+                    },
+                ),
+                (
+                    5,
+                    SimInput::Key {
+                        evdev: 47,
+                        pressed: true,
+                    },
+                ),
+                (
+                    85,
+                    SimInput::Key {
+                        evdev: 47,
+                        pressed: false,
+                    },
+                ),
+                (
+                    130,
+                    SimInput::Key {
+                        evdev: 29,
+                        pressed: false,
+                    },
+                ),
+                (140, SimInput::Paste("hola")),
+            ],
+            200,
+        );
+        assert_eq!(
+            actions,
+            vec![
+                key_action(29, true),
+                InputAction::Paste(ClipboardText::new("hola".to_string())),
+                key_action(47, false),
+                key_action(29, false),
+            ]
+        );
+        assert_v_balanced(&actions, 1);
+        assert!(!state.has_held_keys());
+    }
+
+    #[test]
+    fn fast_ctrl_v_followed_by_letter_preserves_order() {
+        let t0 = Instant::now();
+        let (state, actions) = run_frame_timeline(
+            t0,
+            &[
+                (
+                    0,
+                    SimInput::Key {
+                        evdev: 29,
+                        pressed: true,
+                    },
+                ),
+                (
+                    5,
+                    SimInput::Key {
+                        evdev: 47,
+                        pressed: true,
+                    },
+                ),
+                (
+                    85,
+                    SimInput::Key {
+                        evdev: 47,
+                        pressed: false,
+                    },
+                ),
+                (
+                    130,
+                    SimInput::Key {
+                        evdev: 29,
+                        pressed: false,
+                    },
+                ),
+                (
+                    140,
+                    SimInput::Key {
+                        evdev: 30,
+                        pressed: true,
+                    },
+                ),
+                (
+                    160,
+                    SimInput::Key {
+                        evdev: 30,
+                        pressed: false,
+                    },
+                ),
+            ],
+            250,
+        );
+        assert_eq!(
+            actions,
+            vec![
+                key_action(29, true),
+                key_action(47, true),
+                key_action(47, false),
+                key_action(29, false),
+                key_action(30, true),
+                key_action(30, false),
+            ]
+        );
+        assert!(!state.has_held_keys());
+    }
+
+    #[test]
+    fn focus_leave_discards_queued_keys_and_releases_pc_held() {
+        let t0 = Instant::now();
+        let (state, actions) = run_frame_timeline(
+            t0,
+            &[
+                (
+                    0,
+                    SimInput::Key {
+                        evdev: 29,
+                        pressed: true,
+                    },
+                ),
+                (
+                    5,
+                    SimInput::Key {
+                        evdev: 47,
+                        pressed: true,
+                    },
+                ),
+                (
+                    50,
+                    SimInput::Key {
+                        evdev: 47,
+                        pressed: false,
+                    },
+                ),
+                (
+                    70,
+                    SimInput::Key {
+                        evdev: 29,
+                        pressed: false,
+                    },
+                ),
+                (
+                    80,
+                    SimInput::Key {
+                        evdev: 30,
+                        pressed: true,
+                    },
+                ),
+                (
+                    90,
+                    SimInput::Key {
+                        evdev: 30,
+                        pressed: false,
+                    },
+                ),
+                (100, SimInput::Leave),
+            ],
+            300,
+        );
+        assert_eq!(actions, vec![key_action(29, true), key_action(29, false)]);
+        let mut pc_held = HashSet::new();
+        apply_pc_actions(&mut pc_held, &actions);
+        assert!(pc_held.is_empty());
+        assert!(!state.has_held_keys());
+    }
+
+    #[test]
+    fn slow_ctrl_v_without_text_preserves_order() {
+        let t0 = Instant::now();
+        let (state, actions) = run_frame_timeline(
+            t0,
+            &[
+                (
+                    0,
+                    SimInput::Key {
+                        evdev: 29,
+                        pressed: true,
+                    },
+                ),
+                (
+                    5,
+                    SimInput::Key {
+                        evdev: 47,
+                        pressed: true,
+                    },
+                ),
+                (
+                    85,
+                    SimInput::Key {
+                        evdev: 47,
+                        pressed: false,
+                    },
+                ),
+                (
+                    300,
+                    SimInput::Key {
+                        evdev: 29,
+                        pressed: false,
+                    },
+                ),
+            ],
+            350,
+        );
+        assert_eq!(
+            actions,
+            vec![
+                key_action(29, true),
+                key_action(47, true),
+                key_action(47, false),
+                key_action(29, false),
+            ]
+        );
+        assert!(!state.has_held_keys());
+    }
+
+    #[test]
+    fn queued_keys_are_omitted_from_debug_output() {
+        let t0 = Instant::now();
+        let mut state = KeyState::new(true, true);
+        state.handle_physical_key(29, true, t0);
+        state.handle_physical_key(47, true, t0 + Duration::from_millis(5));
+        state.handle_physical_key(30, true, t0 + Duration::from_millis(20)); // A
+        state.handle_physical_key(31, true, t0 + Duration::from_millis(30)); // S
+        state.handle_physical_key(32, true, t0 + Duration::from_millis(40)); // D
+
+        let debug = format!("{state:?}");
+        assert!(
+            debug.contains("queued: KeyQueue(3 keys)"),
+            "Debug must show queued count: {debug}"
+        );
+        assert!(
+            !debug.contains("QueuedKey") && !debug.contains("evdev"),
+            "Debug must omit queued key identities: {debug}"
+        );
+    }
+
+    #[test]
+    fn queued_second_ctrl_v_gets_full_correlation_window_at_resolution_time() {
+        let t0 = Instant::now();
+        let mut state = KeyState::new(true, true);
+        let mut actions = Vec::new();
+
+        actions.extend(state.handle_physical_key(29, true, t0));
+        actions.extend(state.handle_physical_key(47, true, t0 + Duration::from_millis(5)));
+        actions.extend(state.handle_physical_key(47, false, t0 + Duration::from_millis(15)));
+        actions.extend(state.handle_physical_key(47, true, t0 + Duration::from_millis(25)));
+        actions.extend(state.handle_physical_key(47, false, t0 + Duration::from_millis(35)));
+        actions.extend(state.handle_physical_key(29, false, t0 + Duration::from_millis(45)));
+
+        // Advance 16 ms frames until V1 expires at 160 ms (V2 becomes pending at 160 ms).
+        let mut tick_ms = 16u64;
+        while tick_ms <= 160 {
+            actions.extend(state.tick(t0 + Duration::from_millis(tick_ms)));
+            tick_ms += 16;
+        }
+
+        // At 176 ms (> 25 + 150 ms from arrival, 16 ms from resolution), V2 must still wait.
+        let at_176 = state.tick(t0 + Duration::from_millis(176));
+        assert!(
+            at_176.is_empty(),
+            "queued V2 must not expire early based on queue arrival time: {at_176:?}"
+        );
+
+        // Delayed Paste at 190 ms resolves V2 before releasing Ctrl.
+        actions.extend(state.handle_egui_paste(
+            ClipboardText::new("second".to_string()),
+            t0 + Duration::from_millis(190),
+        ));
+        for ms in [192u64, 208, 224] {
+            actions.extend(state.tick(t0 + Duration::from_millis(ms)));
+        }
+
+        assert_eq!(
+            actions,
+            vec![
+                key_action(29, true),
+                key_action(47, true),
+                key_action(47, false),
+                InputAction::Paste(ClipboardText::new("second".to_string())),
+                key_action(47, false),
+                key_action(29, false),
+            ]
+        );
+        let mut pc_held = HashSet::new();
+        apply_pc_actions(&mut pc_held, &actions);
+        assert!(pc_held.is_empty());
+        assert!(!state.has_held_keys());
+    }
+
+    struct SplitMix64(u64);
+
+    impl SplitMix64 {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        fn range(&mut self, lo: u64, hi_inclusive: u64) -> u64 {
+            lo + (self.next_u64() % (hi_inclusive - lo + 1))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum GenOp {
+        Key { evdev: u32, pressed: bool },
+        Paste,
+    }
+
+    #[test]
+    fn generated_ctrl_v_sequences_preserve_invariants() {
+        let mut rng = SplitMix64(0x5245_4D4F_504F_5254);
+
+        for seed_idx in 0..4_000u64 {
+            let mut ops: Vec<(u64, GenOp)> = Vec::new();
+            let mut cur_ms = 0u64;
+            let mut a_cursor = 0u64;
+            let mut last_paste_ms = 0u64;
+            let blocks = rng.range(1, 3);
+
+            for _ in 0..blocks {
+                let t_c = cur_ms + rng.range(0, 15);
+                ops.push((
+                    t_c,
+                    GenOp::Key {
+                        evdev: 29,
+                        pressed: true,
+                    },
+                ));
+
+                let mut v_cursor = t_c + 1;
+                let num_vs = rng.range(1, 2);
+                let mut last_v_down = t_c;
+
+                for _ in 0..num_vs {
+                    let paste_kind = rng.range(0, 9); // 0..=4 none, 5..=6 pre-V, 7..=9 post-V
+                    let delta = rng.range(0, 50);
+                    let t_v = if paste_kind == 5 || paste_kind == 6 {
+                        // Pre-V paste: Ctrl must already be pressed and FIFO order of Pastes preserved.
+                        let t_p = v_cursor.max(last_paste_ms + 1);
+                        ops.push((t_p, GenOp::Paste));
+                        last_paste_ms = t_p;
+                        t_p + delta
+                    } else if paste_kind >= 7 {
+                        let tv = v_cursor;
+                        let t_p = (tv + delta).max(last_paste_ms + 1);
+                        if t_p - tv <= 50 {
+                            ops.push((t_p, GenOp::Paste));
+                            last_paste_ms = t_p;
+                        }
+                        tv
+                    } else {
+                        v_cursor
+                    };
+
+                    let v_dur = if rng.range(0, 9) == 0 {
+                        rng.range(515, 580)
+                    } else {
+                        rng.range(1, 90)
+                    };
+                    let t_v_up = t_v + v_dur;
+                    ops.push((
+                        t_v,
+                        GenOp::Key {
+                            evdev: 47,
+                            pressed: true,
+                        },
+                    ));
+                    ops.push((
+                        t_v_up,
+                        GenOp::Key {
+                            evdev: 47,
+                            pressed: false,
+                        },
+                    ));
+                    last_v_down = t_v;
+                    v_cursor = t_v_up + rng.range(1, 35);
+                }
+
+                // Ctrl release can occur right after the last V press (before V release / Paste)
+                // or much later.
+                let t_c_up = match rng.range(0, 2) {
+                    0 => last_v_down + rng.range(1, 25),
+                    1 => v_cursor + rng.range(0, 80),
+                    _ => v_cursor + rng.range(160, 260),
+                };
+                ops.push((
+                    t_c_up,
+                    GenOp::Key {
+                        evdev: 29,
+                        pressed: false,
+                    },
+                ));
+
+                // Interleave A presses/releases (both short queue hits and long repeats).
+                let a_bursts = rng.range(0, 2);
+                for _ in 0..a_bursts {
+                    let ta_down = a_cursor.max(t_c) + rng.range(0, 140);
+                    let a_dur = if rng.range(0, 9) == 0 {
+                        rng.range(515, 570)
+                    } else {
+                        rng.range(5, 45)
+                    };
+                    let ta_up = ta_down + a_dur;
+                    ops.push((
+                        ta_down,
+                        GenOp::Key {
+                            evdev: 30,
+                            pressed: true,
+                        },
+                    ));
+                    ops.push((
+                        ta_up,
+                        GenOp::Key {
+                            evdev: 30,
+                            pressed: false,
+                        },
+                    ));
+                    a_cursor = ta_up + rng.range(1, 20);
+                }
+
+                // Occasional standalone V without Ctrl.
+                let mut next_block_min = t_c_up.max(v_cursor).max(last_paste_ms) + rng.range(1, 40);
+                if rng.range(0, 4) == 0 {
+                    let tv_plain = next_block_min;
+                    let tv_plain_up = tv_plain + rng.range(5, 40);
+                    ops.push((
+                        tv_plain,
+                        GenOp::Key {
+                            evdev: 47,
+                            pressed: true,
+                        },
+                    ));
+                    ops.push((
+                        tv_plain_up,
+                        GenOp::Key {
+                            evdev: 47,
+                            pressed: false,
+                        },
+                    ));
+                    next_block_min = tv_plain_up + rng.range(5, 30);
+                }
+
+                cur_ms = next_block_min;
+            }
+
+            // Stable sort preserves Press before Release or Paste before V on equal ms.
+            ops.sort_by_key(|(ms, _)| *ms);
+
+            let max_op_ms = ops.last().map_or(0, |(ms, _)| *ms);
+            let total_v_presses = ops
+                .iter()
+                .filter(|(_, op)| {
+                    matches!(
+                        op,
+                        GenOp::Key {
+                            evdev: 47,
+                            pressed: true
+                        }
+                    )
+                })
+                .count() as u64;
+            let leave_ms = if rng.range(0, 3) == 0 && max_op_ms > 5 {
+                Some(rng.range(1, max_op_ms))
+            } else {
+                None
+            };
+            let end_ms = leave_ms.map_or_else(
+                || max_op_ms + (total_v_presses * 2 + 2) * 180,
+                |ms| ms + 220,
+            );
+
+            let t0 = Instant::now();
+            let mut state = KeyState::new(true, true);
+            let mut tracker = RepeatTracker::new();
+            let mut pc_held = HashSet::new();
+            let mut phys_ctrl_held = false;
+            let mut expected_v_with_ctrl = 0usize;
+            let mut expected_v_without_ctrl = 0usize;
+            let mut observed_v_with_ctrl = 0usize;
+            let mut observed_v_without_ctrl = 0usize;
+            let mut op_idx = 0usize;
+            let mut left_focus = false;
+
+            for ms in 0..=end_ms {
+                let now = t0 + Duration::from_millis(ms);
+
+                if !left_focus {
+                    while op_idx < ops.len() && ops[op_idx].0 == ms {
+                        let op = ops[op_idx].1;
+                        op_idx += 1;
+                        let emitted = match op {
+                            GenOp::Key { evdev, pressed } => {
+                                if evdev == 29 {
+                                    phys_ctrl_held = pressed;
+                                } else if evdev == 47 && pressed {
+                                    if phys_ctrl_held {
+                                        expected_v_with_ctrl += 1;
+                                    } else {
+                                        expected_v_without_ctrl += 1;
+                                    }
+                                }
+                                if pressed {
+                                    tracker.press(evdev, now);
+                                } else {
+                                    tracker.release(evdev);
+                                }
+                                state.handle_physical_key(evdev, pressed, now)
+                            }
+                            GenOp::Paste => {
+                                state.handle_egui_paste(ClipboardText::new("x".to_string()), now)
+                            }
+                        };
+                        let (wc, woc) = apply_pc_actions(&mut pc_held, &emitted);
+                        observed_v_with_ctrl += wc;
+                        observed_v_without_ctrl += woc;
+                    }
+
+                    if let Some(rep_evdev) = tracker.tick(now) {
+                        if rep_evdev == 47 {
+                            if phys_ctrl_held {
+                                expected_v_with_ctrl += 1;
+                            } else {
+                                expected_v_without_ctrl += 1;
+                            }
+                        }
+                        let emitted = state.handle_physical_key(rep_evdev, true, now);
+                        let (wc, woc) = apply_pc_actions(&mut pc_held, &emitted);
+                        observed_v_with_ctrl += wc;
+                        observed_v_without_ctrl += woc;
+                    }
+
+                    if leave_ms == Some(ms) {
+                        left_focus = true;
+                        tracker.clear();
+                        let emitted = state.handle_leave();
+                        let (wc, woc) = apply_pc_actions(&mut pc_held, &emitted);
+                        observed_v_with_ctrl += wc;
+                        observed_v_without_ctrl += woc;
+                        assert!(
+                            pc_held.is_empty(),
+                            "seed {seed_idx}: PC held keys remain after handle_leave: {pc_held:?}"
+                        );
+                        assert!(
+                            !state.has_held_keys(),
+                            "seed {seed_idx}: KeyState held keys remain after handle_leave"
+                        );
+                    }
+                }
+
+                if ms > 0 && ms % 16 == 0 {
+                    let emitted = state.tick(now);
+                    if left_focus {
+                        assert!(
+                            emitted.is_empty(),
+                            "seed {seed_idx}: queued actions leaked after handle_leave: {emitted:?}"
+                        );
+                    }
+                    let (wc, woc) = apply_pc_actions(&mut pc_held, &emitted);
+                    observed_v_with_ctrl += wc;
+                    observed_v_without_ctrl += woc;
+                }
+            }
+
+            assert!(
+                pc_held.is_empty(),
+                "seed {seed_idx}: keys left pressed on PC at end: {pc_held:?}"
+            );
+            assert!(
+                !state.has_held_keys(),
+                "seed {seed_idx}: KeyState has held keys at end"
+            );
+            if left_focus {
+                assert!(
+                    observed_v_without_ctrl <= expected_v_without_ctrl,
+                    "seed {seed_idx}: V reached PC without Ctrl held: observed_without={observed_v_without_ctrl}, expected_without={expected_v_without_ctrl}"
+                );
+            } else {
+                assert_eq!(
+                    observed_v_with_ctrl, expected_v_with_ctrl,
+                    "seed {seed_idx}: physical Ctrl+V did not reach PC with Ctrl held"
+                );
+                assert_eq!(
+                    observed_v_without_ctrl, expected_v_without_ctrl,
+                    "seed {seed_idx}: mismatch in non-Ctrl V presses (possible Ctrl release overtake)"
+                );
+            }
+        }
     }
 }

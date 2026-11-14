@@ -202,6 +202,9 @@ pub fn is_repeatable_key(evdev: u32) -> bool {
 struct QueuedKey {
     evdev: u32,
     pressed: bool,
+    /// When the event arrived. Replaying with it gives a queued `V` the same
+    /// correlation window it would have had without the queue.
+    at: Instant,
 }
 
 /// Queue of physical key events held back while a `V` press awaits clipboard text.
@@ -211,8 +214,8 @@ struct QueuedKey {
 struct KeyQueue(VecDeque<QueuedKey>);
 
 impl KeyQueue {
-    fn push(&mut self, evdev: u32, pressed: bool) {
-        self.0.push_back(QueuedKey { evdev, pressed });
+    fn push(&mut self, evdev: u32, pressed: bool, at: Instant) {
+        self.0.push_back(QueuedKey { evdev, pressed, at });
     }
 
     fn pop_front(&mut self) -> Option<QueuedKey> {
@@ -317,7 +320,7 @@ impl KeyState {
         // While a physical Ctrl+V is waiting for egui Paste, defer every subsequent
         // physical key event (presses, releases, repeats) in arrival order.
         if self.pending_v.is_some() {
-            self.queued.push(evdev, pressed);
+            self.queued.push(evdev, pressed, now);
             return actions;
         }
 
@@ -438,14 +441,26 @@ impl KeyState {
         self.flush_pending(now)
     }
 
+    /// Sends a pending `V` whose window ran out by `now` as a plain key press,
+    /// then replays queued events in arrival order until another `V` has to
+    /// wait. Each event keeps its arrival time: a queued `V` gets exactly the
+    /// window it would have had without the queue, so a chain of them (a held
+    /// Ctrl+V repeating with no text to paste) never delays the keys behind it
+    /// by more than one window.
     fn drain_queued(&mut self, now: Instant, actions: &mut Vec<InputAction>) {
-        // Replay deferred events at resolution time `now` so a second Ctrl+V in the
-        // queue receives a full correlation window instead of timing out immediately.
-        while self.pending_v.is_none() {
+        loop {
+            if let Some(press_time) = self.pending_v {
+                if now.saturating_duration_since(press_time) < PASTE_CORRELATION_TIMEOUT {
+                    return;
+                }
+                self.pending_v = None;
+                self.held.insert(V_SCANCODE);
+                actions.push(v_key(true));
+            }
             let Some(next) = self.queued.pop_front() else {
-                break;
+                return;
             };
-            self.process_physical_key(next.evdev, next.pressed, now, actions);
+            self.process_physical_key(next.evdev, next.pressed, next.at, actions);
         }
     }
 
@@ -458,13 +473,8 @@ impl KeyState {
     fn flush_pending(&mut self, now: Instant) -> Vec<InputAction> {
         let mut actions = Vec::new();
 
-        if let Some(press_time) = self.pending_v {
-            if now.saturating_duration_since(press_time) >= PASTE_CORRELATION_TIMEOUT {
-                self.pending_v = None;
-                self.held.insert(V_SCANCODE);
-                actions.push(v_key(true));
-                self.drain_queued(now, &mut actions);
-            }
+        if self.pending_v.is_some() {
+            self.drain_queued(now, &mut actions);
         }
 
         if let Some(paste_time) = self.pending_paste {
@@ -1687,42 +1697,43 @@ mod tests {
         );
     }
 
+    /// Two quick Ctrl+V: Ctrl↓ 0, V1↓ 5, V1↑ 15, V2↓ 25, V2↑ 35, Ctrl↑ 45, with
+    /// a frame tick every 16 ms up to 160 ms. V1 gets no text and goes out as a
+    /// key when its window ends at 155 ms; V2 has waited in the queue since it
+    /// arrived at 25 ms.
+    fn two_quick_ctrl_v_until_160_ms(state: &mut KeyState, t0: Instant) -> Vec<InputAction> {
+        let mut actions = Vec::new();
+        for (ms, evdev, pressed) in [
+            (0u64, 29, true),
+            (5, 47, true),
+            (15, 47, false),
+            (25, 47, true),
+            (35, 47, false),
+            (45, 29, false),
+        ] {
+            actions.extend(state.handle_physical_key(
+                evdev,
+                pressed,
+                t0 + Duration::from_millis(ms),
+            ));
+        }
+        for tick_ms in (16u64..=160).step_by(16) {
+            actions.extend(state.tick(t0 + Duration::from_millis(tick_ms)));
+        }
+        actions
+    }
+
     #[test]
-    fn queued_second_ctrl_v_gets_full_correlation_window_at_resolution_time() {
+    fn queued_second_ctrl_v_keeps_its_window_from_arrival() {
+        // A: V2's text arrives at 170 ms, 145 ms after V2 itself: still inside
+        // V2's window, so it pastes with Ctrl still down on the PC.
         let t0 = Instant::now();
         let mut state = KeyState::new(true, true);
-        let mut actions = Vec::new();
-
-        actions.extend(state.handle_physical_key(29, true, t0));
-        actions.extend(state.handle_physical_key(47, true, t0 + Duration::from_millis(5)));
-        actions.extend(state.handle_physical_key(47, false, t0 + Duration::from_millis(15)));
-        actions.extend(state.handle_physical_key(47, true, t0 + Duration::from_millis(25)));
-        actions.extend(state.handle_physical_key(47, false, t0 + Duration::from_millis(35)));
-        actions.extend(state.handle_physical_key(29, false, t0 + Duration::from_millis(45)));
-
-        // Advance 16 ms frames until V1 expires at 160 ms (V2 becomes pending at 160 ms).
-        let mut tick_ms = 16u64;
-        while tick_ms <= 160 {
-            actions.extend(state.tick(t0 + Duration::from_millis(tick_ms)));
-            tick_ms += 16;
-        }
-
-        // At 176 ms (> 25 + 150 ms from arrival, 16 ms from resolution), V2 must still wait.
-        let at_176 = state.tick(t0 + Duration::from_millis(176));
-        assert!(
-            at_176.is_empty(),
-            "queued V2 must not expire early based on queue arrival time: {at_176:?}"
-        );
-
-        // Delayed Paste at 190 ms resolves V2 before releasing Ctrl.
+        let mut actions = two_quick_ctrl_v_until_160_ms(&mut state, t0);
         actions.extend(state.handle_egui_paste(
             ClipboardText::new("second".to_string()),
-            t0 + Duration::from_millis(190),
+            t0 + Duration::from_millis(170),
         ));
-        for ms in [192u64, 208, 224] {
-            actions.extend(state.tick(t0 + Duration::from_millis(ms)));
-        }
-
         assert_eq!(
             actions,
             vec![
@@ -1736,6 +1747,108 @@ mod tests {
         );
         let mut pc_held = HashSet::new();
         apply_pc_actions(&mut pc_held, &actions);
+        assert!(pc_held.is_empty());
+        assert!(!state.has_held_keys());
+
+        // B: no text for V2 either. Its window, counted from 25 ms, ends at
+        // 175 ms; it does not start over when V1 resolves at 160 ms, so the
+        // frame at 176 ms sends V2 and everything queued behind it.
+        let t0 = Instant::now();
+        let mut state = KeyState::new(true, true);
+        let mut actions = two_quick_ctrl_v_until_160_ms(&mut state, t0);
+        actions.extend(state.tick(t0 + Duration::from_millis(176)));
+        assert_eq!(
+            actions,
+            vec![
+                key_action(29, true),
+                key_action(47, true),
+                key_action(47, false),
+                key_action(47, true),
+                key_action(47, false),
+                key_action(29, false),
+            ]
+        );
+        let mut pc_held = HashSet::new();
+        apply_pc_actions(&mut pc_held, &actions);
+        assert!(pc_held.is_empty());
+        assert!(!state.has_held_keys());
+    }
+
+    #[test]
+    fn held_ctrl_v_without_text_delays_keys_by_at_most_one_window() {
+        // Ctrl+V held for 2 s with nothing to paste: after 500 ms the listener
+        // repeats V every 40 ms. Each V waits for text that never comes; the
+        // waits must not add up, or Ctrl↑ and the keys typed next reach the PC
+        // seconds late.
+        let t0 = Instant::now();
+        let mut state = KeyState::new(true, true);
+        let mut tracker = RepeatTracker::new();
+        let physical = [
+            (0u64, 29, true),
+            (5, 47, true),
+            (2005, 47, false),
+            (2045, 29, false),
+            (2105, 30, true),
+            (2125, 30, false),
+        ];
+        let mut sent: Vec<(u64, InputAction)> = Vec::new();
+        let mut v_presses_made = 0usize;
+
+        for ms in 0..=3000u64 {
+            let now = t0 + Duration::from_millis(ms);
+            for &(_, evdev, pressed) in physical.iter().filter(|event| event.0 == ms) {
+                if pressed {
+                    tracker.press(evdev, now);
+                    if evdev == 47 {
+                        v_presses_made += 1;
+                    }
+                } else {
+                    tracker.release(evdev);
+                }
+                let actions = state.handle_physical_key(evdev, pressed, now);
+                sent.extend(actions.into_iter().map(|action| (ms, action)));
+            }
+            if let Some(evdev) = tracker.tick(now) {
+                if evdev == 47 {
+                    v_presses_made += 1;
+                }
+                let actions = state.handle_physical_key(evdev, true, now);
+                sent.extend(actions.into_iter().map(|action| (ms, action)));
+            }
+            if ms % 16 == 0 {
+                sent.extend(state.tick(now).into_iter().map(|action| (ms, action)));
+            }
+        }
+
+        let one_window = PASTE_CORRELATION_TIMEOUT.as_millis() as u64 + 16;
+        let sent_at = |wanted: InputAction| {
+            sent.iter()
+                .find(|(_, action)| *action == wanted)
+                .map(|(ms, _)| *ms)
+        };
+        let ctrl_up = sent_at(key_action(29, false)).expect("Ctrl released on the PC");
+        assert!(
+            ctrl_up <= 2045 + one_window,
+            "Ctrl↑ reached the PC at {ctrl_up} ms; it happened at 2045 ms"
+        );
+        let a_down = sent_at(key_action(30, true)).expect("A pressed on the PC");
+        assert!(
+            a_down <= 2105 + one_window,
+            "A↓ reached the PC at {a_down} ms; it happened at 2105 ms"
+        );
+
+        // The PC still sees one V for each press or repeat, as a local Ctrl+V would.
+        assert!(v_presses_made > 30);
+        let v_presses_sent = sent
+            .iter()
+            .filter(|(_, action)| *action == key_action(47, true))
+            .count();
+        assert_eq!(v_presses_sent, v_presses_made);
+
+        let actions: Vec<InputAction> = sent.into_iter().map(|(_, action)| action).collect();
+        let mut pc_held = HashSet::new();
+        let (_, v_without_ctrl) = apply_pc_actions(&mut pc_held, &actions);
+        assert_eq!(v_without_ctrl, 0);
         assert!(pc_held.is_empty());
         assert!(!state.has_held_keys());
     }
